@@ -1,0 +1,14 @@
+[package]
+name = "base2histogram"
+version = "0.1.0"
+edition = "2024"
+description = "A Rust histogram library using base-2 logarithmic bucketing for fast percentile estimation"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/drmingdrmer/base2histogram"
+homepage = "https://github.com/drmingdrmer/base2histogram"
+documentation = "https://docs.rs/base2histogram"
+keywords = ["histogram", "percentile", "metrics", "latency"]
+categories = ["algorithms", "data-structures"]
+
+[dependencies]
