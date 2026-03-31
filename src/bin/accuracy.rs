@@ -1,7 +1,9 @@
 use std::f64::consts::PI;
+use std::sync::LazyLock;
 
 use base2histogram::Histogram;
-use base2histogram::LOG_SCALE;
+use base2histogram::LogScale;
+use base2histogram::LogScaleConfig;
 
 /// Simple xorshift64 PRNG (no external dependency needed).
 struct Rng(u64);
@@ -53,28 +55,32 @@ const PERCENTILES: &[(f64, &str)] = &[
     (0.999, "P99.9"),
 ];
 
-/// Evaluate percentile accuracy for one distribution.
-/// Returns the max relative error (%).
-fn evaluate(name: &str, values: &[u64]) -> f64 {
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable();
+struct Distribution {
+    name: String,
+    label: &'static str,
+    values: Vec<u64>,
+    sorted: Vec<u64>,
+}
 
-    let mut hist = Histogram::<()>::new();
-    for &v in values {
+/// Evaluate percentile accuracy for one distribution.
+/// Returns the absolute relative error (%) for each percentile point.
+fn evaluate<const WIDTH: usize>(dist: &Distribution, log_scale: &'static LogScale<WIDTH>) -> Vec<f64> {
+    let mut hist = Histogram::<(), WIDTH>::with_log_scale(log_scale, 1);
+    for &v in &dist.values {
         hist.record(v);
     }
 
-    println!("\n  {name}");
+    println!("\n  {}", dist.name);
     println!(
         "  {:<10} {:>14} {:>14} {:>10}",
         "Percentile", "Exact", "Estimated", "Error%"
     );
     println!("  {:-<52}", "");
 
-    let mut max_err = 0.0f64;
+    let mut errors = Vec::with_capacity(PERCENTILES.len());
 
     for &(p, label) in PERCENTILES {
-        let exact = exact_percentile(&sorted, p);
+        let exact = exact_percentile(&dist.sorted, p);
         let estimated = hist.percentile(p);
 
         let rel_err = if exact == 0 {
@@ -83,129 +89,222 @@ fn evaluate(name: &str, values: &[u64]) -> f64 {
             (exact as f64 - estimated as f64) / exact as f64 * 100.0
         };
 
-        max_err = max_err.max(rel_err.abs());
+        errors.push(rel_err.abs());
 
         println!("  {:<10} {:>14} {:>14} {:>9.3}%", label, exact, estimated, rel_err);
     }
 
     println!("  {:-<52}", "");
-    println!("  Max relative error: {max_err:.3}%");
-    max_err
+    errors
+}
+
+fn generate_distributions(n: usize) -> Vec<Distribution> {
+    let mut rng = Rng::new(12345);
+    let mut dists = Vec::new();
+
+    macro_rules! dist {
+        ($name:expr, $label:expr, $gen:expr) => {{
+            let values: Vec<u64> = (0..n).map(|_| $gen(&mut rng)).collect();
+            let mut sorted = values.clone();
+            sorted.sort_unstable();
+            dists.push(Distribution {
+                name: $name.into(),
+                label: $label,
+                values,
+                sorted,
+            });
+        }};
+    }
+
+    dist!("Uniform [0, 1_000_000]", "Uniform", |rng: &mut Rng| {
+        rng.next_u64() % 1_000_001
+    });
+
+    dist!("Log-normal (median~1100us, API latency)", "LN-API", |rng: &mut Rng| {
+        (7.0 + 0.5 * rng.next_normal()).exp() as u64
+    });
+
+    dist!(
+        "Bimodal (90% ~500us fast, 10% ~50ms slow)",
+        "Bimodal",
+        |rng: &mut Rng| {
+            if rng.next_u64() % 100 < 90 {
+                (500.0 + 50.0 * rng.next_normal()).max(1.0) as u64
+            } else {
+                (50_000.0 + 10_000.0 * rng.next_normal()).max(1000.0) as u64
+            }
+        }
+    );
+
+    dist!("Exponential (mean=1000us, IO wait)", "Expon", |rng: &mut Rng| {
+        let u = rng.next_f64().max(1e-15);
+        (-u.ln() * 1000.0) as u64
+    });
+
+    dist!(
+        "Log-normal (median~3ms, sigma=1.0, DB query)",
+        "LN-DB",
+        |rng: &mut Rng| { (8.0 + 1.0 * rng.next_normal()).exp() as u64 }
+    );
+
+    // Sequential — already sorted, no clone needed
+    let values: Vec<u64> = (1..=n as u64).collect();
+    let sorted = values.clone();
+    dists.push(Distribution {
+        name: format!("Sequential [1..{n}]"),
+        label: "Sequent",
+        values,
+        sorted,
+    });
+
+    dist!("Pareto (alpha=1.5, xmin=100, heavy tail)", "Pareto", |rng: &mut Rng| {
+        let u = rng.next_f64().max(1e-15);
+        (100.0 / u.powf(1.0 / 1.5)) as u64
+    });
+
+    dists
+}
+
+static SCALE_1: LazyLock<LogScale<1>> = LazyLock::new(LogScale::new);
+static SCALE_2: LazyLock<LogScale<2>> = LazyLock::new(LogScale::new);
+static SCALE_3: LazyLock<LogScale<3>> = LazyLock::new(LogScale::new);
+static SCALE_4: LazyLock<LogScale<4>> = LazyLock::new(LogScale::new);
+static SCALE_5: LazyLock<LogScale<5>> = LazyLock::new(LogScale::new);
+static SCALE_6: LazyLock<LogScale<6>> = LazyLock::new(LogScale::new);
+
+/// Summary statistics for one WIDTH across all distributions.
+struct WidthResult {
+    width: usize,
+    buckets: usize,
+    memory_bytes: usize,
+    /// errors\[dist_idx\]\[percentile_idx\] — absolute relative error %
+    errors: Vec<Vec<f64>>,
+}
+
+macro_rules! run_width {
+    ($width:expr, $scale:expr, $distributions:expr, $results:expr) => {{
+        let log_scale: &'static LogScale<{ $width }> = &$scale;
+        let buckets = LogScaleConfig::<{ $width }>::BUCKETS;
+        // 1-slot histogram: aggregate_buckets + 1 slot's buckets = 2 * buckets * 8
+        let memory_bytes = 2 * buckets * size_of::<u64>();
+
+        println!("\n{}", "=".repeat(60));
+        println!(
+            "WIDTH={}  ({} buckets, {})",
+            $width,
+            buckets,
+            format_bytes(memory_bytes),
+        );
+        println!("{}", "=".repeat(60));
+
+        let mut errors: Vec<Vec<f64>> = Vec::new();
+        for dist in $distributions.iter() {
+            errors.push(evaluate(dist, log_scale));
+        }
+
+        $results.push(WidthResult {
+            width: $width,
+            buckets,
+            memory_bytes,
+            errors,
+        });
+    }};
 }
 
 fn main() {
-    println!("=== base2histogram Percentile Accuracy Report ===\n");
+    println!("=== base2histogram Percentile Accuracy Report ===");
 
     let n = 1_000_000usize;
-    let mut rng = Rng::new(12345);
-    let mut all_max_errors = Vec::new();
+    println!("\nGenerating {n} samples per distribution...");
+    let distributions = generate_distributions(n);
 
-    println!("--- Empirical Percentile Accuracy ({n} samples each) ---");
+    let mut results: Vec<WidthResult> = Vec::new();
 
-    // 1. Uniform [0, 1_000_000] — baseline
-    let values: Vec<u64> = (0..n).map(|_| rng.next_u64() % 1_000_001).collect();
-    all_max_errors.push(evaluate("Uniform [0, 1_000_000]", &values));
+    run_width!(1, SCALE_1, &distributions, &mut results);
+    run_width!(2, SCALE_2, &distributions, &mut results);
+    run_width!(3, SCALE_3, &distributions, &mut results);
+    run_width!(4, SCALE_4, &distributions, &mut results);
+    run_width!(5, SCALE_5, &distributions, &mut results);
+    run_width!(6, SCALE_6, &distributions, &mut results);
 
-    // 2. Log-normal — typical API/service latency in microseconds mu=7 (median ~1100us), sigma=0.5
-    //    (moderate spread) Realistic: most requests ~1ms, tail extends to ~10ms
-    let values: Vec<u64> = (0..n)
-        .map(|_| {
-            let z = rng.next_normal();
-            (7.0 + 0.5 * z).exp() as u64
-        })
-        .collect();
-    all_max_errors.push(evaluate("Log-normal (median~1100us, API latency)", &values));
+    // --- Summary chart ---
 
-    // 3. Bimodal — cache hit/miss pattern 90% fast path ~500us, 10% slow path ~50ms
-    let values: Vec<u64> = (0..n)
-        .map(|_| {
-            if rng.next_u64() % 100 < 90 {
-                // Fast path: normal around 500us, sigma=50
-                (500.0 + 50.0 * rng.next_normal()).max(1.0) as u64
-            } else {
-                // Slow path: normal around 50000us, sigma=10000
-                (50_000.0 + 10_000.0 * rng.next_normal()).max(1000.0) as u64
-            }
-        })
-        .collect();
-    all_max_errors.push(evaluate("Bimodal (90% ~500us fast, 10% ~50ms slow)", &values));
+    let label_w = 14;
+    let col_w = 10;
+    let n_widths = results.len();
+    let rule_len = label_w + 2 + n_widths * (col_w + 1);
 
-    // 4. Exponential — network/IO wait times Mean ~1000us (1ms), long right tail
-    let values: Vec<u64> = (0..n)
-        .map(|_| {
-            let u = rng.next_f64().max(1e-15);
-            (-u.ln() * 1000.0) as u64
-        })
-        .collect();
-    all_max_errors.push(evaluate("Exponential (mean=1000us, IO wait)", &values));
+    // Percentile indices to show: P50, P90, P95, P99
+    let summary = &[(5, "P50"), (8, "P95"), (9, "P99")];
 
-    // 5. Log-normal with heavier tail — database query latency mu=8 (median ~3ms), sigma=1.0 (wide
-    //    spread, heavy tail)
-    let values: Vec<u64> = (0..n)
-        .map(|_| {
-            let z = rng.next_normal();
-            (8.0 + 1.0 * z).exp() as u64
-        })
-        .collect();
-    all_max_errors.push(evaluate("Log-normal (median~3ms, sigma=1.0, DB query)", &values));
+    println!("\n{}", "=".repeat(rule_len));
+    println!("Summary: Relative Error at P50 / P95 / P99");
+    println!("{}", "=".repeat(rule_len));
+    println!();
+    println!("  WIDTH:  Bucket granularity parameter. Each bucket group uses WIDTH");
+    println!("          bits, giving 2^(WIDTH-1) buckets per group. Higher WIDTH");
+    println!("          means finer resolution but more memory.");
+    println!();
+    println!("  Memory: Per-slot = buckets x 8 bytes.");
+    println!("          Total for a 1-slot histogram = 2 x per-slot");
+    println!("          (one for the slot, one for the aggregate).");
+    println!();
+    println!("  Error:  |exact - estimated| / exact x 100%.");
+    println!();
 
-    // 6. Sequential [1..N] — perfectly smooth baseline
-    let values: Vec<u64> = (1..=n as u64).collect();
-    all_max_errors.push(evaluate(&format!("Sequential [1..{n}]"), &values));
-
-    // 7. Pareto (heavy tail) — request sizes, wealth distribution P(X > x) = (x_min/x)^alpha,
-    //    alpha=1.5, x_min=100
-    let values: Vec<u64> = (0..n)
-        .map(|_| {
-            let u = rng.next_f64().max(1e-15);
-            (100.0 / u.powf(1.0 / 1.5)) as u64
-        })
-        .collect();
-    all_max_errors.push(evaluate("Pareto (alpha=1.5, xmin=100, heavy tail)", &values));
-
-    // --- Summary ---
-
-    let overall_max = all_max_errors.iter().cloned().fold(0.0f64, f64::max);
-    let overall_avg = all_max_errors.iter().sum::<f64>() / all_max_errors.len() as f64;
-    println!("\n--- Summary ---");
-    println!("  Overall max relative error: {overall_max:.3}%");
-    println!("  Overall avg of max errors:  {overall_avg:.3}%");
-
-    // --- Theoretical per-bucket error ---
-
-    println!("\n--- Theoretical Per-Bucket Error (WIDTH=3, 252 buckets) ---");
-    println!(
-        "  {:<8} {:>14} {:>14} {:>14} {:>10}",
-        "Bucket", "Min Value", "Max Value", "Width", "Max Err%"
-    );
-    println!("  {:-<66}", "");
-
-    let num_buckets = LOG_SCALE.num_buckets();
-    let mut worst_err = 0.0f64;
-
-    for b in 0..num_buckets {
-        let min_val = LOG_SCALE.bucket_min_value(b);
-        let max_val = if b + 1 < num_buckets {
-            LOG_SCALE.bucket_min_value(b + 1) - 1
-        } else {
-            u64::MAX
-        };
-        let width = max_val - min_val + 1;
-        let half_width = (max_val - min_val) / 2;
-        let max_err = if min_val == 0 {
-            0.0
-        } else {
-            half_width as f64 / min_val as f64 * 100.0
-        };
-        worst_err = worst_err.max(max_err);
-
-        if b < 20 || b % 20 == 0 || b == num_buckets - 1 {
-            println!(
-                "  {:<8} {:>14} {:>14} {:>14} {:>9.3}%",
-                b, min_val, max_val, width, max_err
-            );
-        }
+    // Header
+    print!("  {:<label_w$}", "");
+    for r in &results {
+        print!(" {:>col_w$}", format!("W={}", r.width));
     }
-    println!("  {:-<66}", "");
-    println!("  Worst-case per-value error: {worst_err:.3}%");
+    println!();
+    println!("  {:-<width$}", "", width = rule_len - 2);
+
+    // Per-distribution rows: 4 sub-rows per distribution (P50, P90, P95, P99)
+    for (i, dist) in distributions.iter().enumerate() {
+        for (si, &(pidx, plabel)) in summary.iter().enumerate() {
+            let row_label = if si == 0 {
+                format!("{:<8}{}", dist.label, plabel)
+            } else {
+                format!("{:<8}{}", "", plabel)
+            };
+            print!("  {:<label_w$}", row_label);
+            for r in &results {
+                print!(" {:>w$.3}%", r.errors[i][pidx], w = col_w - 1);
+            }
+            println!();
+        }
+        println!();
+    }
+    println!("  {:-<width$}", "", width = rule_len - 2);
+
+    // Buckets row
+    print!("  {:<label_w$}", "Buckets");
+    for r in &results {
+        print!(" {:>col_w$}", r.buckets);
+    }
+    println!();
+
+    // Memory rows
+    print!("  {:<label_w$}", "Mem/slot");
+    for r in &results {
+        print!(" {:>col_w$}", format_bytes(r.memory_bytes / 2));
+    }
+    println!();
+    print!("  {:<label_w$}", "Mem total");
+    for r in &results {
+        print!(" {:>col_w$}", format_bytes(r.memory_bytes));
+    }
+    println!();
+    println!("  {:-<width$}", "", width = rule_len - 2);
+}
+
+fn format_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
