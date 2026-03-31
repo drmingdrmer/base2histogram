@@ -1,5 +1,5 @@
 use super::log_scale::LOG_SCALE;
-use super::log_scale::LogScale3;
+use super::log_scale::LogScale;
 use super::percentile_stats::PercentileStats;
 use super::slot::Slot;
 use super::slot_queue::SlotQueue;
@@ -60,9 +60,9 @@ use super::slot_queue::SlotQueue;
 /// Fixed at 252 buckets * 8 bytes = 2,016 bytes per slot, covering the entire
 /// u64 range [0, 2^64-1].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Histogram<T = ()> {
+pub struct Histogram<T = (), const WIDTH: usize = 3> {
     /// Log scale for value-to-bucket mapping.
-    log_scale: &'static LogScale3,
+    log_scale: &'static LogScale<WIDTH>,
 
     /// Slots containing bucket counts and metadata.
     /// All slots in the deque are active. First slot (index 0) is oldest, last is current.
@@ -100,7 +100,9 @@ impl<T> Histogram<T> {
     pub fn with_slots(slot_limit: usize) -> Self {
         Self::with_log_scale(&LOG_SCALE, slot_limit)
     }
+}
 
+impl<T, const WIDTH: usize> Histogram<T, WIDTH> {
     /// Creates a new histogram with custom log scale and slot limit.
     ///
     /// # Arguments
@@ -111,7 +113,7 @@ impl<T> Histogram<T> {
     /// # Panics
     ///
     /// Panics if `slot_limit` is 0.
-    pub fn with_log_scale(log_scale: &'static LogScale3, slot_limit: usize) -> Self {
+    pub fn with_log_scale(log_scale: &'static LogScale<WIDTH>, slot_limit: usize) -> Self {
         assert!(slot_limit > 0, "slot_limit must be at least 1");
 
         let num_buckets = log_scale.num_buckets();
@@ -655,4 +657,55 @@ mod tests {
         assert_eq!(hist.total(), manual_total(&hist));
         assert_eq!(hist.total(), 4); // 7 values recorded in slots 1,2 minus evicted = 3 + 1 = 4
     }
+
+    // Edge case tests for all practical WIDTH values (1-10).
+    // WIDTH range is theoretically 1..=65, but memory grows as 2^(WIDTH-1) buckets per group.
+    // WIDTH=10 already uses ~224KB per slot; beyond that is impractical for testing.
+
+    macro_rules! test_histogram_width_edge_cases {
+        ($name:ident, $width:expr) => {
+            #[test]
+            fn $name() {
+                use std::sync::LazyLock;
+                static SCALE: LazyLock<LogScale<{ $width }>> = LazyLock::new(LogScale::new);
+
+                assert_eq!(SCALE.num_buckets(), LogScaleConfig::<{ $width }>::BUCKETS);
+
+                let mut hist = Histogram::<(), { $width }>::with_log_scale(&SCALE, 2);
+
+                // Edge values: 0, 1, u64::MAX
+                hist.record(0);
+                hist.record(1);
+                hist.record(u64::MAX);
+                assert_eq!(hist.total(), 3);
+
+                // Percentile must not panic on edge values
+                let p0 = hist.percentile(0.0);
+                assert_eq!(p0, 0);
+                let _ = hist.percentile(0.5);
+                let p100 = hist.percentile(1.0);
+                assert!(p100 > 0);
+
+                // Multi-slot: advance and verify aggregate
+                hist.advance(());
+                hist.record(1000);
+                assert_eq!(hist.total(), 4);
+
+                // Evict oldest slot
+                hist.advance(());
+                assert_eq!(hist.total(), 1);
+            }
+        };
+    }
+
+    test_histogram_width_edge_cases!(test_width_edge_1, 1);
+    test_histogram_width_edge_cases!(test_width_edge_2, 2);
+    test_histogram_width_edge_cases!(test_width_edge_3, 3);
+    test_histogram_width_edge_cases!(test_width_edge_4, 4);
+    test_histogram_width_edge_cases!(test_width_edge_5, 5);
+    test_histogram_width_edge_cases!(test_width_edge_6, 6);
+    test_histogram_width_edge_cases!(test_width_edge_7, 7);
+    test_histogram_width_edge_cases!(test_width_edge_8, 8);
+    test_histogram_width_edge_cases!(test_width_edge_9, 9);
+    test_histogram_width_edge_cases!(test_width_edge_10, 10);
 }
