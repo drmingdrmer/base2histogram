@@ -22,10 +22,11 @@
 //! hist.record(5);
 //! hist.record(8);
 //! hist.record(13);
-//! hist.record_n(21, 2);
+//! hist.record_n(21, 3);
 //!
-//! assert_eq!(hist.total(), 5);
-//! assert!(hist.percentile(0.5) <= hist.percentile(0.99));
+//! assert_eq!(hist.total(), 6);
+//! assert_eq!(hist.percentile(0.50), 12);
+//! assert_eq!(hist.percentile(0.99), 23);
 //! ```
 //!
 //! Sliding-window style aggregation with slots:

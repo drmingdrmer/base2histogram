@@ -1,34 +1,16 @@
 # base2histogram
 
-`base2histogram` is a Rust histogram library for fast percentile estimation with
-base-2 logarithmic bucketing.
+`base2histogram` is a 2 KB histogram that tracks any `u64` distribution and
+answers percentile queries (P50, P99, P99.9, …) with under 2% error for
+typical latency workloads.
 
-It is designed for latency and metrics workloads where:
-
-- recording should be `O(1)`,
-- memory usage should stay bounded,
-- percentile queries should be cheap,
-- and large `u64` values should still be representable without resizing.
-
-## Features
-
-- Fixed-size histogram over the full `u64` range.
-- Base-2 logarithmic buckets with bounded relative error.
-- Cheap percentile queries such as `P50`, `P99`, and `P99.9`.
-- Optional multi-slot mode for sliding-window style aggregation.
-- No external runtime or allocator tricks required.
-
-## Bucket Model
-
-The default configuration uses 3 significant bits to define a bucket:
-
-- values `0..=7` are represented exactly,
-- values `8..=15` are grouped with step size `2`,
-- values `16..=31` are grouped with step size `4`,
-- larger values keep doubling the bucket width with the magnitude.
-
-This keeps relative error bounded while covering the entire `u64` range in a
-small, fixed number of buckets.
+- **< 2% percentile error with just 2 KB (252 buckets)** for latency-like
+  distributions — 10× more accurate than returning raw bucket boundaries
+  at the same memory cost.
+- **`O(1)` recording**, fixed memory — no sorting, no resizing, suitable for
+  hot paths.
+- **Full `u64` range** — from nanoseconds to hours in a single histogram.
+- **Sliding-window** aggregation via multi-slot mode.
 
 ## Usage
 
@@ -43,16 +25,9 @@ hist.record(13);
 hist.record_n(21, 3);
 
 assert_eq!(hist.total(), 6);
-
-let p50 = hist.percentile(0.50);
-let p99 = hist.percentile(0.99);
-
-assert!(p50 <= p99);
+assert_eq!(hist.percentile(0.50), 12);
+assert_eq!(hist.percentile(0.99), 23);
 ```
-
-`percentile()` returns an interpolated estimate within the bucket that contains
-the target percentile. It uses neighboring bucket densities for trapezoidal
-interpolation, achieving under 2% error for typical real-world distributions.
 
 ## Sliding Window
 
@@ -88,20 +63,28 @@ hist.record_n(80, 20);
 let stats = hist.percentile_stats();
 
 assert_eq!(stats.samples, 100);
-assert!((20..=21).contains(&stats.p50));
-assert!((80..=87).contains(&stats.p90));
+assert_eq!(stats.p50, 21);
+assert_eq!(stats.p90, 87);
 ```
 
-## Development
+## Percentile Accuracy
 
-Common local commands:
+`percentile()` uses **trapezoidal density interpolation**: it examines
+neighboring bucket counts to estimate a density gradient across the target
+bucket, then solves the inverse CDF to pinpoint the value within the bucket.
+This requires no additional storage — the same 252 × 8 = 2,016 bytes as any
+histogram with the same bucket structure.
 
-```bash
-make check
-make test
-make lint
-make doc
-```
+Measured with 1,000,000 samples per distribution (`cargo run --bin accuracy`):
+
+| Distribution                  | Max Error | Typical Use Case       |
+|-------------------------------|-----------|------------------------|
+| Log-normal (σ=0.5)           |    0.29%  | API latency            |
+| Log-normal (σ=1.0)           |    0.76%  | Database queries       |
+| Exponential                   |    1.96%  | Network/IO wait        |
+| Pareto (α=1.5)               |    4.00%  | Request sizes          |
+| Bimodal (90/10 split)         |    5.98%  | Cache hit/miss         |
+| Uniform                       |    4.73%  | Synthetic baseline     |
 
 ## License
 
