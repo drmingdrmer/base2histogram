@@ -53,6 +53,80 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
         self.bucket_min_values[bucket]
     }
 
+    /// Returns the maximum value for the given bucket index.
+    #[inline]
+    pub fn bucket_max_value(&self, bucket: usize) -> u64 {
+        if bucket + 1 < self.bucket_min_values.len() {
+            self.bucket_min_values[bucket + 1] - 1
+        } else {
+            u64::MAX
+        }
+    }
+
+    /// Interpolates within a bucket using trapezoidal density estimation.
+    ///
+    /// Uses neighbor bucket densities to estimate a linear density gradient
+    /// across the target bucket, then solves for the position corresponding
+    /// to the given rank. Falls back to uniform interpolation when neighbors
+    /// provide no gradient information (both empty or at histogram edges).
+    #[inline]
+    pub fn interpolate(&self, bucket: usize, rank: u64, count: u64, prev_count: u64, next_count: u64) -> u64 {
+        let min_val = self.bucket_min_values[bucket];
+        let max_val = self.bucket_max_value(bucket);
+        let range = (max_val - min_val) as f64;
+
+        if count <= 1 || range == 0.0 {
+            return min_val + (max_val - min_val) / 2;
+        }
+
+        let f = (rank - 1) as f64 / (count - 1) as f64;
+
+        // Need both neighbors for trapezoidal interpolation
+        if bucket == 0 || bucket + 1 >= self.bucket_min_values.len() {
+            return min_val + (range * f) as u64;
+        }
+
+        let prev_min = self.bucket_min_values[bucket - 1];
+        let prev_width = (min_val - prev_min) as f64;
+        let next_min = self.bucket_min_values[bucket + 1];
+        let next_max = self.bucket_max_value(bucket + 1);
+        let next_width = (next_max - next_min + 1) as f64;
+
+        let d_prev = prev_count as f64 / prev_width;
+        let d_next = next_count as f64 / next_width;
+
+        if d_prev == 0.0 && d_next == 0.0 {
+            return min_val + (range * f) as u64;
+        }
+
+        // Interpolate density at target bucket edges using neighbor midpoints
+        let m_prev = (prev_min as f64 + (min_val - 1) as f64) / 2.0;
+        let m_next = (next_min as f64 + next_max as f64) / 2.0;
+        let span = m_next - m_prev;
+
+        let d_left = (d_prev + (d_next - d_prev) * (min_val as f64 - m_prev) / span).max(0.0);
+        let d_right = (d_prev + (d_next - d_prev) * (max_val as f64 - m_prev) / span).max(0.0);
+
+        // Trapezoidal CDF: C(t) = a*t + b*t²/2, where a = d_left, b = d_right - d_left
+        // Solve C(t) / C(1) = f for t ∈ [0, 1]
+        let a = d_left;
+        let b = d_right - d_left;
+
+        let t = if b.abs() < a.abs() * 1e-9 {
+            f
+        } else {
+            let target_area = f * (a + b / 2.0);
+            let discriminant = a * a + 2.0 * b * target_area;
+            if discriminant < 0.0 {
+                f
+            } else {
+                (-a + discriminant.sqrt()) / b
+            }
+        };
+
+        min_val + (range * t.clamp(0.0, 1.0)) as u64
+    }
+
     /// Calculates bucket index for a value, using cache for small values.
     #[inline]
     pub fn calculate_bucket(&self, value: u64) -> usize {

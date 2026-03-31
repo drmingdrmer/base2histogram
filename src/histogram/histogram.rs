@@ -44,14 +44,16 @@ use super::slot_queue::SlotQueue;
 ///   Final bucket index: 4 + (3 * 4) + 1 = 17
 /// ```
 ///
-/// # Precision
+/// # Bucket Resolution
 ///
 /// - Values 0-7: exact (1:1 mapping)
-/// - Values 8-15: ±1 (2 values per bucket)
-/// - Values 16-31: ±2 (4 values per bucket)
-/// - Values 2^n to 2^(n+1)-1: ±2^(n-2)
+/// - Values 8-15: 2 values per bucket
+/// - Values 16-31: 4 values per bucket
+/// - Values 2^n to 2^(n+1)-1: 2^(n-2) values per bucket
 ///
-/// Relative error is bounded at ~12.5% for values >= 8.
+/// Percentile accuracy depends on the distribution and sample count.
+/// For typical real-world distributions (log-normal, exponential), percentile
+/// error is under 2%. See `cargo run --bin accuracy` for detailed benchmarks.
 ///
 /// # Memory Usage
 ///
@@ -195,8 +197,9 @@ impl<T> Histogram<T> {
 
     /// Calculates the value at the given percentile.
     ///
-    /// Returns the minimum value of the bucket containing the percentile.
-    /// For example, `percentile(0.5)` returns P50 (median), `percentile(0.99)` returns P99.
+    /// Returns an interpolated estimate within the bucket containing the percentile.
+    /// Uses neighboring bucket densities for trapezoidal interpolation, falling back
+    /// to uniform interpolation at histogram edges or when neighbors are empty.
     ///
     /// Returns `0` if the histogram is empty.
     #[allow(dead_code)]
@@ -218,9 +221,22 @@ impl<T> Histogram<T> {
         let mut cumulative = 0u64;
 
         for (bucket_index, &count) in self.aggregate_buckets.iter().enumerate() {
+            let prev_cumulative = cumulative;
             cumulative += count;
             if cumulative >= target {
-                return self.log_scale.bucket_min_value(bucket_index);
+                let prev_count = if bucket_index > 0 {
+                    self.aggregate_buckets[bucket_index - 1]
+                } else {
+                    0
+                };
+                let next_count = self.aggregate_buckets.get(bucket_index + 1).copied().unwrap_or(0);
+                return self.log_scale.interpolate(
+                    bucket_index,
+                    target - prev_cumulative,
+                    count,
+                    prev_count,
+                    next_count,
+                );
             }
         }
 
@@ -419,8 +435,8 @@ mod tests {
         assert!(stats.p50 >= 48 && stats.p50 <= 52, "P50 = {}", stats.p50);
         // P90 around 90, bucket min value might be 80
         assert!(stats.p90 >= 80 && stats.p90 <= 92, "P90 = {}", stats.p90);
-        // P99 around 99, bucket min value might be 96
-        assert!(stats.p99 >= 96 && stats.p99 <= 100, "P99 = {}", stats.p99);
+        // P99 around 99, interpolated within bucket [96, 111]
+        assert!(stats.p99 >= 96 && stats.p99 <= 112, "P99 = {}", stats.p99);
     }
 
     #[test]
@@ -436,9 +452,9 @@ mod tests {
 
         assert_eq!(hist.total(), 5);
 
-        // P50 (median) should be the 3rd value (100), but bucket returns min value (96)
+        // P50 (median) should be the 3rd value (100), bucket [96,111] midpoint is 103
         let p50 = hist.percentile(0.5);
-        assert!((96..=100).contains(&p50), "P50 = {p50}");
+        assert!((96..=104).contains(&p50), "P50 = {p50}");
 
         // P80 should be the 4th value (1000), but bucket returns min value
         let p80 = hist.percentile(0.8);

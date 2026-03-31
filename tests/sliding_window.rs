@@ -14,11 +14,11 @@ fn application_can_track_a_sliding_window() {
     assert_eq!(hist.total(), 5);
 
     let p90 = hist.percentile(0.9);
-    assert!((96..=100).contains(&p90), "p90 = {p90}");
+    assert!((96..=112).contains(&p90), "p90 = {p90}");
 
     assert_eq!(hist.advance("steady"), 2);
     assert_eq!(hist.total(), 3);
 
     let p50 = hist.percentile(0.5);
-    assert!((96..=100).contains(&p50), "p50 = {p50}");
+    assert!((96..=112).contains(&p50), "p50 = {p50}");
 }

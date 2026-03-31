@@ -35,14 +35,14 @@ fn application_reports_precomputed_percentile_stats() {
         p1: 5,
         p5: 5,
         p10: 5,
-        p50: 20,
-        p90: 80,
-        p99: 80,
-        p99_9: 80,
+        p50: 21,
+        p90: 87,
+        p99: 94,
+        p99_9: 95,
     });
 
     assert_eq!(
         stats.to_string(),
-        "[samples: 100, P0.1: 5, P1: 5, P5: 5, P10: 5, P50: 20, P90: 80, P99: 80, P99.9: 80]"
+        "[samples: 100, P0.1: 5, P1: 5, P5: 5, P10: 5, P50: 21, P90: 87, P99: 94, P99.9: 95]"
     );
 }
