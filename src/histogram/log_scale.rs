@@ -67,10 +67,10 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
     ///
     /// Uses neighbor bucket densities to estimate a linear density gradient
     /// across the target bucket, then solves for the position corresponding
-    /// to the given rank. Falls back to uniform interpolation when neighbors
-    /// provide no gradient information (both empty or at histogram edges).
+    /// to the given rank. Falls back to uniform interpolation for edge buckets
+    /// (first/last) or when count <= 1.
     #[inline]
-    pub fn interpolate(&self, bucket: usize, rank: u64, count: u64, prev_count: u64, next_count: u64) -> u64 {
+    pub fn interpolate(&self, bucket: usize, rank: u64, count: u64, c0: u64, c2: u64) -> u64 {
         let min_val = self.bucket_min_values[bucket];
         let max_val = self.bucket_max_value(bucket);
         let range = (max_val - min_val) as f64;
@@ -79,52 +79,81 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
             return min_val + (max_val - min_val) / 2;
         }
 
-        let f = (rank - 1) as f64 / (count - 1) as f64;
+        let f = rank as f64 / count as f64;
 
-        // Need both neighbors for trapezoidal interpolation
-        if bucket == 0 || bucket + 1 >= self.bucket_min_values.len() {
-            return min_val + (range * f) as u64;
-        }
-
-        let prev_min = self.bucket_min_values[bucket - 1];
-        let prev_width = (min_val - prev_min) as f64;
-        let next_min = self.bucket_min_values[bucket + 1];
-        let next_max = self.bucket_max_value(bucket + 1);
-        let next_width = (next_max - next_min + 1) as f64;
-
-        let d_prev = prev_count as f64 / prev_width;
-        let d_next = next_count as f64 / next_width;
-
-        if d_prev == 0.0 && d_next == 0.0 {
-            return min_val + (range * f) as u64;
-        }
-
-        // Interpolate density at target bucket edges using neighbor midpoints
-        let m_prev = (prev_min as f64 + (min_val - 1) as f64) / 2.0;
-        let m_next = (next_min as f64 + next_max as f64) / 2.0;
-        let span = m_next - m_prev;
-
-        let d_left = (d_prev + (d_next - d_prev) * (min_val as f64 - m_prev) / span).max(0.0);
-        let d_right = (d_prev + (d_next - d_prev) * (max_val as f64 - m_prev) / span).max(0.0);
-
-        // Trapezoidal CDF: C(t) = a*t + b*t²/2, where a = d_left, b = d_right - d_left
-        // Solve C(t) / C(1) = f for t ∈ [0, 1]
-        let a = d_left;
-        let b = d_right - d_left;
-
-        let t = if b.abs() < a.abs() * 1e-9 {
+        // Edge buckets have no prev/next neighbor; use uniform interpolation
+        let t = if bucket < 1 || bucket + 1 >= self.bucket_min_values.len() {
             f
         } else {
-            let target_area = f * (a + b / 2.0);
-            let discriminant = a * a + 2.0 * b * target_area;
-            if discriminant < 0.0 {
-                f
-            } else {
-                (-a + discriminant.sqrt()) / b
-            }
+            self.trapezoidal_t(bucket, f, count, c0, c2)
         };
 
         min_val + (range * t.clamp(0.0, 1.0)) as u64
+    }
+
+    /// Computes the trapezoidal interpolation parameter t for a fractional rank f.
+    ///
+    /// Requires that bucket has both a previous and next neighbor.
+    /// If not, the caller should use uniform interpolation (t = f) instead.
+    ///
+    /// Models density as linear across the bucket with slope k from neighbors,
+    /// anchored at the bucket's known density d1 = c1/w1 at midpoint m1:
+    /// ```text
+    ///   bucket:  [i-1]      [i]        [i+1]
+    ///   min:      x0         x1         x2
+    ///   width:  |----w0----|----w1----|----w2----|
+    ///              d0         d1          d2      (density)
+    ///              m0         m1          m2      (midpoint)
+    /// ```
+    fn trapezoidal_t(&self, bucket: usize, f: f64, c1: u64, c0: u64, c2: u64) -> f64 {
+        // Equal neighbor counts: density is uniform, CDF is linear
+        if c0 == c2 {
+            return f;
+        }
+
+        let x0 = self.bucket_min_values[bucket - 1] as f64;
+        let x1 = self.bucket_min_values[bucket] as f64;
+        let x2 = self.bucket_min_values[bucket + 1] as f64;
+        let x3 = self.bucket_max_value(bucket + 1) as f64 + 1.0;
+
+        // Bucket widths
+        let w0 = x1 - x0;
+        let w1 = x2 - x1;
+        let w2 = x3 - x2;
+
+        // Density slope from neighbors
+        let d0 = c0 as f64 / w0;
+        let d1 = c1 as f64 / w1;
+        let d2 = c2 as f64 / w2;
+        let m0 = (x0 + x1) / 2.0;
+        let m2 = (x2 + x3) / 2.0;
+        let k = (d2 - d0) / (m2 - m0);
+
+        // Density across bucket: d(t) = d1 + s·(t − 0.5), t ∈ [0, 1]
+        //   where s = k·w1 (total density change across bucket)
+        //
+        // CDF: C(t) = (d1 − s/2)·t + s·t²/2
+        // C(1) = d1
+        //
+        // Solve C(t) = f·d1:
+        //   s/2·t² + (d1 − s/2)·t − f·d1 = 0
+        //
+        // Let a = d1 − s/2 (density at left edge):
+        //   t = (−a + √(a² + 2·s·f·d1)) / s
+        let s = k * w1;
+
+        // Near-uniform density: slope across bucket is negligible
+        if s.abs() < d1.abs() * 1e-9 {
+            return f;
+        }
+
+        let a = d1 - s / 2.0;
+        let disc = a * a + 2.0 * s * f * d1;
+        if disc < 0.0 {
+            return f;
+        }
+
+        (-a + disc.sqrt()) / s
     }
 
     /// Calculates bucket index for a value, using cache for small values.
