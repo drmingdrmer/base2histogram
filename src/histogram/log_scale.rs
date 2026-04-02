@@ -100,6 +100,39 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
         (left + (range * t.clamp(0.0, 1.0)) as u64).min(right - 1)
     }
 
+    /// Computes the density slope `k` across three adjacent buckets.
+    ///
+    /// Given bucket counts `c0, c1, c2` and boundaries `x0..x3`, computes the
+    /// rate of change in density (count/width) per unit of x between the
+    /// midpoints of bucket 0 and bucket 2:
+    ///
+    /// ```text
+    ///   k = (d2 - d0) / (m2 - m0)
+    /// ```
+    ///
+    /// where `d = count / width` and `m = midpoint`.
+    /// Computes the density slope `k` across a bucket and its two neighbors.
+    ///
+    /// `bucket` must have both a previous and next neighbor (i.e., not the
+    /// first or last bucket).
+    fn density_slope(&self, bucket: usize, count0: u64, count2: u64) -> f64 {
+        let x0 = self.bucket_min_values[bucket - 1] as f64;
+        let x1 = self.bucket_min_values[bucket] as f64;
+        let x2 = self.bucket_min_values[bucket + 1] as f64;
+        let x3 = self.bucket_right(bucket + 1) as f64;
+
+        let width0 = x1 - x0;
+        let width2 = x3 - x2;
+
+        let density0 = count0 as f64 / width0;
+        let density2 = count2 as f64 / width2;
+
+        let m0 = (x0 + x1) / 2.0;
+        let m2 = (x2 + x3) / 2.0;
+
+        (density2 - density0) / (m2 - m0)
+    }
+
     /// Computes the trapezoidal interpolation parameter t for a fractional rank f.
     ///
     /// Requires that bucket has both a previous and next neighbor.
@@ -120,23 +153,13 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
             return f;
         }
 
-        let x0 = self.bucket_min_values[bucket - 1] as f64;
         let x1 = self.bucket_min_values[bucket] as f64;
         let x2 = self.bucket_min_values[bucket + 1] as f64;
-        let x3 = self.bucket_right(bucket + 1) as f64;
 
-        // Bucket widths
-        let w0 = x1 - x0;
         let w1 = x2 - x1;
-        let w2 = x3 - x2;
-
-        // Density slope from neighbors
-        let d0 = c0 as f64 / w0;
         let d1 = c1 as f64 / w1;
-        let d2 = c2 as f64 / w2;
-        let m0 = (x0 + x1) / 2.0;
-        let m2 = (x2 + x3) / 2.0;
-        let k = (d2 - d0) / (m2 - m0);
+
+        let k = self.density_slope(bucket, c0, c2);
 
         // Density across bucket: d(t) = d1 + s·(t − 0.5), t ∈ [0, 1]
         //   where s = k·w1 (total density change across bucket)
@@ -362,6 +385,41 @@ mod tests {
                 "Mismatch at value {v}"
             );
         }
+    }
+
+    #[test]
+    fn test_density_slope() {
+        // WIDTH=3 bucket layout:
+        //   bucket 8: [8,10)   width=2
+        //   bucket 9: [10,12)  width=2
+        //   bucket 10: [12,14) width=2
+        //
+        // Equal widths, so density = count / 2, midpoints = 9, 11, 13
+        // c0=10, c2=30 → d0=5, d2=15 → k = (15-5)/(13-9) = 2.5
+        let k = LOG_SCALE.density_slope(9, 10, 30);
+        assert!((k - 2.5).abs() < 1e-10, "k = {k}");
+
+        // Decreasing: c0=30, c2=10 → d0=15, d2=5 → k = -2.5
+        let k = LOG_SCALE.density_slope(9, 30, 10);
+        assert!((k - (-2.5)).abs() < 1e-10, "k = {k}");
+
+        // Equal neighbor counts → k = 0
+        let k = LOG_SCALE.density_slope(9, 20, 20);
+        assert!(k.abs() < 1e-10, "k = {k}");
+
+        // Unequal widths:
+        //   bucket 11: [14,16) width=2
+        //   bucket 12: [16,20) width=4
+        //   bucket 13: [20,24) width=4
+        //
+        // c0=4, c2=8 → d0=4/2=2, d2=8/4=2 → equal density → k=0
+        let k = LOG_SCALE.density_slope(12, 4, 8);
+        assert!(k.abs() < 1e-10, "k = {k}");
+
+        // c0=2, c2=8 → d0=2/2=1, d2=8/4=2
+        // m0=(14+16)/2=15, m2=(20+24)/2=22 → k=(2-1)/(22-15)=1/7
+        let k = LOG_SCALE.density_slope(12, 2, 8);
+        assert!((k - 1.0 / 7.0).abs() < 1e-10, "k = {k}");
     }
 
     #[test]
