@@ -214,26 +214,26 @@ impl<T, const WIDTH: usize> Histogram<T, WIDTH> {
             return 0;
         }
 
-        let target = (total as f64 * p).ceil().max(1.0) as u64;
+        let rank = (total as f64 * p).ceil().max(1.0) as u64;
+        self.value_at_rank(rank)
+    }
+
+    /// Returns the interpolated value at the given rank (1-based position in
+    /// sorted order).
+    fn value_at_rank(&self, rank: u64) -> u64 {
         let mut cumulative = 0u64;
 
         for (bucket_index, &count) in self.aggregate_buckets.iter().enumerate() {
             let prev_cumulative = cumulative;
             cumulative += count;
-            if cumulative >= target {
+            if cumulative >= rank {
                 let prev_count = if bucket_index > 0 {
                     self.aggregate_buckets[bucket_index - 1]
                 } else {
                     0
                 };
                 let next_count = self.aggregate_buckets.get(bucket_index + 1).copied().unwrap_or(0);
-                return self.log_scale.interpolate(
-                    bucket_index,
-                    target - prev_cumulative,
-                    count,
-                    prev_count,
-                    next_count,
-                );
+                return self.log_scale.interpolate(bucket_index, rank - prev_cumulative, count, prev_count, next_count);
             }
         }
 
@@ -422,6 +422,35 @@ mod tests {
             p99: 0,
             p99_9: 0
         });
+    }
+
+    #[test]
+    fn test_value_at_rank() {
+        let mut hist: Histogram = Histogram::new();
+
+        // 10 samples at value 5 (bucket [5,6)), 3 samples at value 100 (bucket [96,112))
+        hist.record_n(5, 10);
+        hist.record_n(100, 3);
+
+        // Rank 0: no samples before rank 0
+        assert_eq!(hist.value_at_rank(0), 0);
+
+        // Ranks 1-10 fall in bucket [5,6): single-width bucket returns 5
+        assert_eq!(hist.value_at_rank(1), 5);
+        assert_eq!(hist.value_at_rank(5), 5);
+        assert_eq!(hist.value_at_rank(10), 5);
+
+        // Ranks 11-13 fall in bucket [96,112), count=3, uniform interpolation
+        // (both neighbors are empty, so t = f = rank_in_bucket / count):
+        //   rank 11: f=1/3, 96 + floor(16 * 1/3) = 96 + 5  = 101
+        //   rank 12: f=2/3, 96 + floor(16 * 2/3) = 96 + 10 = 106
+        //   rank 13: f=3/3, 96 + 16 = 112, clamped to right-1 = 111
+        assert_eq!(hist.value_at_rank(11), 101);
+        assert_eq!(hist.value_at_rank(12), 106);
+        assert_eq!(hist.value_at_rank(13), 111);
+
+        // Rank beyond total returns 0
+        assert_eq!(hist.value_at_rank(14), 0);
     }
 
     #[test]
