@@ -41,10 +41,16 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
         }
     }
 
+    /// Returns the number of buckets for this `WIDTH` (compile-time constant).
+    #[inline]
+    pub const fn total_buckets() -> usize {
+        LogScaleConfig::<WIDTH>::BUCKETS
+    }
+
     /// Returns the number of buckets.
     #[inline]
-    pub fn num_buckets(&self) -> usize {
-        self.bucket_min_values.len()
+    pub const fn num_buckets(&self) -> usize {
+        Self::total_buckets()
     }
 
     /// Returns the minimum value for the given bucket index.
@@ -222,6 +228,14 @@ pub static LOG_SCALE: LazyLock<LogScale3> = LazyLock::new(LogScale3::new);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_total_buckets_is_const() {
+        // total_buckets() is const fn without &self, usable for array sizing at compile time.
+        let buckets: [u64; LogScale3::total_buckets()] = [0; LogScale3::total_buckets()];
+        assert_eq!(buckets.len(), 252);
+        assert_eq!(LOG_SCALE.num_buckets(), 252);
+    }
 
     #[test]
     fn test_calculate_bucket_group_0() {

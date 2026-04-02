@@ -1,3 +1,4 @@
+use super::bucket_ref::BucketRef;
 use super::log_scale::LOG_SCALE;
 use super::log_scale::LogScale;
 use super::percentile_stats::PercentileStats;
@@ -255,14 +256,32 @@ impl<T, const WIDTH: usize> Histogram<T, WIDTH> {
         }
     }
 
+    /// Returns an iterator over all bucket data.
+    ///
+    /// Includes all buckets (even those with count 0). Callers can filter
+    /// non-empty buckets with `.filter(|b| b.count > 0)`.
+    pub fn bucket_data(&self) -> impl Iterator<Item = BucketRef<'_, WIDTH>> + '_ {
+        (0..self.num_buckets()).map(|i| self.bucket(i))
+    }
+
     #[cfg(test)]
     pub(crate) fn get_bucket(&self, index: usize) -> u64 {
         self.aggregate_buckets[index]
     }
 
-    #[cfg(test)]
-    pub(crate) fn num_buckets(&self) -> usize {
-        self.log_scale.num_buckets()
+    /// Returns the number of buckets for this `WIDTH` (compile-time constant).
+    pub const fn total_buckets() -> usize {
+        LogScale::<WIDTH>::total_buckets()
+    }
+
+    /// Returns the number of buckets.
+    pub const fn num_buckets(&self) -> usize {
+        Self::total_buckets()
+    }
+
+    /// Returns a lazy reference to the bucket at the given index.
+    pub fn bucket(&self, index: usize) -> BucketRef<'_, WIDTH> {
+        BucketRef::new(self.log_scale, index, self.aggregate_buckets[index])
     }
 }
 
@@ -271,6 +290,32 @@ mod tests {
     use super::*;
     use crate::histogram::LogScale3;
     use crate::histogram::LogScaleConfig;
+
+    #[test]
+    fn test_bucket_data() {
+        let mut hist: Histogram = Histogram::new();
+        hist.record(5);
+        hist.record_n(10, 3);
+
+        let non_empty: Vec<_> = hist.bucket_data().filter(|b| b.count() > 0).collect();
+
+        assert_eq!(non_empty.len(), 2);
+        assert_eq!(
+            (non_empty[0].min(), non_empty[0].max(), non_empty[0].count()),
+            (5, 5, 1)
+        );
+        assert_eq!(
+            (non_empty[1].min(), non_empty[1].max(), non_empty[1].count()),
+            (10, 11, 3)
+        );
+    }
+
+    #[test]
+    fn test_bucket_data_includes_all_buckets() {
+        let hist: Histogram = Histogram::new();
+        assert_eq!(hist.bucket_data().count(), 252);
+        assert!(hist.bucket_data().all(|b| b.count() == 0));
+    }
 
     #[test]
     fn test_slot_clear() {

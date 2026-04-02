@@ -1,11 +1,18 @@
+mod ascii_chart;
+mod bucket_ref;
+mod compact_display;
+mod detailed_display;
 #[allow(clippy::module_inception)]
 mod histogram;
 mod log_scale;
 mod log_scale_config;
 mod percentile_stats;
+mod series;
 mod slot;
 mod slot_queue;
 
+pub use ascii_chart::AsciiChart;
+pub use bucket_ref::BucketRef;
 pub use histogram::Histogram;
 #[allow(unused_imports)]
 pub use log_scale::LOG_SCALE;
