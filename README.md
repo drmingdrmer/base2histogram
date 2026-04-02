@@ -1,5 +1,7 @@
 # base2histogram
 
+![](logo.svg)
+
 `base2histogram` is a 2 KB histogram that tracks any `u64` distribution and
 answers percentile queries (P50, P99, P99.9, …) with under 2% error for
 typical latency workloads.
