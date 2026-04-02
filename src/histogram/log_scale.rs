@@ -6,12 +6,12 @@ use super::log_scale_config::LogScaleConfig;
 ///
 /// Handles value-to-bucket mapping:
 /// - Value → bucket index (with small-value cache)
-/// - Bucket index → minimum value
+/// - Bucket index → left boundary value
 ///
 /// Use the shared [`LOG_SCALE`] instance for WIDTH=3 (default configuration).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogScale<const WIDTH: usize> {
-    /// Minimum value represented by each bucket index.
+    /// Left boundary value for each bucket index.
     bucket_min_values: Vec<u64>,
     /// Cached bucket indices for small values (0-4095).
     small_value_buckets: Vec<u8>,
@@ -53,17 +53,20 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
         Self::total_buckets()
     }
 
-    /// Returns the minimum value for the given bucket index.
+    /// Returns the left boundary value for the given bucket index.
     #[inline]
-    pub fn bucket_min_value(&self, bucket: usize) -> u64 {
+    pub fn bucket_left(&self, bucket: usize) -> u64 {
         self.bucket_min_values[bucket]
     }
 
-    /// Returns the maximum value for the given bucket index.
+    /// Returns the right open boundary value for the given bucket index.
+    ///
+    /// For the last bucket, returns `u64::MAX` since it overflows.
+    /// Thus, there is an inaccuracy
     #[inline]
-    pub fn bucket_max_value(&self, bucket: usize) -> u64 {
+    pub fn bucket_right(&self, bucket: usize) -> u64 {
         if bucket + 1 < self.bucket_min_values.len() {
-            self.bucket_min_values[bucket + 1] - 1
+            self.bucket_min_values[bucket + 1]
         } else {
             u64::MAX
         }
@@ -77,12 +80,12 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
     /// (first/last) or when count <= 1.
     #[inline]
     pub fn interpolate(&self, bucket: usize, rank: u64, count: u64, c0: u64, c2: u64) -> u64 {
-        let min_val = self.bucket_min_values[bucket];
-        let max_val = self.bucket_max_value(bucket);
-        let range = (max_val - min_val) as f64;
+        let left = self.bucket_min_values[bucket];
+        let right = self.bucket_right(bucket);
+        let range = (right - left) as f64;
 
-        if count <= 1 || range == 0.0 {
-            return min_val + (max_val - min_val) / 2;
+        if count <= 1 || range == 1.0 {
+            return left + (right - left) / 2;
         }
 
         let f = rank as f64 / count as f64;
@@ -94,7 +97,7 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
             self.trapezoidal_t(bucket, f, count, c0, c2)
         };
 
-        min_val + (range * t.clamp(0.0, 1.0)) as u64
+        (left + (range * t.clamp(0.0, 1.0)) as u64).min(right - 1)
     }
 
     /// Computes the trapezoidal interpolation parameter t for a fractional rank f.
@@ -106,7 +109,7 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
     /// anchored at the bucket's known density d1 = c1/w1 at midpoint m1:
     /// ```text
     ///   bucket:  [i-1]      [i]        [i+1]
-    ///   min:      x0         x1         x2
+    ///   left:     x0         x1         x2
     ///   width:  |----w0----|----w1----|----w2----|
     ///              d0         d1          d2      (density)
     ///              m0         m1          m2      (midpoint)
@@ -120,7 +123,7 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
         let x0 = self.bucket_min_values[bucket - 1] as f64;
         let x1 = self.bucket_min_values[bucket] as f64;
         let x2 = self.bucket_min_values[bucket + 1] as f64;
-        let x3 = self.bucket_max_value(bucket + 1) as f64 + 1.0;
+        let x3 = self.bucket_right(bucket + 1) as f64;
 
         // Bucket widths
         let w0 = x1 - x0;
@@ -200,7 +203,7 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
         g_size + group_index * g_size + offset_in_group
     }
 
-    /// Computes the minimum value for a bucket index.
+    /// Computes the left boundary value for a bucket index.
     fn compute_bucket_min_value(bucket: usize) -> u64 {
         let g_size = LogScaleConfig::<WIDTH>::GROUP_SIZE;
 
@@ -295,28 +298,28 @@ mod tests {
     #[test]
     fn test_bucket_min_values_lookup_table() {
         // Group 0: [0, 1, 2, 3]
-        assert_eq!(LOG_SCALE.bucket_min_value(0), 0);
-        assert_eq!(LOG_SCALE.bucket_min_value(1), 1);
-        assert_eq!(LOG_SCALE.bucket_min_value(2), 2);
-        assert_eq!(LOG_SCALE.bucket_min_value(3), 3);
+        assert_eq!(LOG_SCALE.bucket_left(0), 0);
+        assert_eq!(LOG_SCALE.bucket_left(1), 1);
+        assert_eq!(LOG_SCALE.bucket_left(2), 2);
+        assert_eq!(LOG_SCALE.bucket_left(3), 3);
 
         // Group 1: [4, 5, 6, 7]
-        assert_eq!(LOG_SCALE.bucket_min_value(4), 4);
-        assert_eq!(LOG_SCALE.bucket_min_value(5), 5);
-        assert_eq!(LOG_SCALE.bucket_min_value(6), 6);
-        assert_eq!(LOG_SCALE.bucket_min_value(7), 7);
+        assert_eq!(LOG_SCALE.bucket_left(4), 4);
+        assert_eq!(LOG_SCALE.bucket_left(5), 5);
+        assert_eq!(LOG_SCALE.bucket_left(6), 6);
+        assert_eq!(LOG_SCALE.bucket_left(7), 7);
 
         // Group 2: [8, 10, 12, 14]
-        assert_eq!(LOG_SCALE.bucket_min_value(8), 8);
-        assert_eq!(LOG_SCALE.bucket_min_value(9), 10);
-        assert_eq!(LOG_SCALE.bucket_min_value(10), 12);
-        assert_eq!(LOG_SCALE.bucket_min_value(11), 14);
+        assert_eq!(LOG_SCALE.bucket_left(8), 8);
+        assert_eq!(LOG_SCALE.bucket_left(9), 10);
+        assert_eq!(LOG_SCALE.bucket_left(10), 12);
+        assert_eq!(LOG_SCALE.bucket_left(11), 14);
 
         // Group 3: [16, 20, 24, 28]
-        assert_eq!(LOG_SCALE.bucket_min_value(12), 16);
-        assert_eq!(LOG_SCALE.bucket_min_value(13), 20);
-        assert_eq!(LOG_SCALE.bucket_min_value(14), 24);
-        assert_eq!(LOG_SCALE.bucket_min_value(15), 28);
+        assert_eq!(LOG_SCALE.bucket_left(12), 16);
+        assert_eq!(LOG_SCALE.bucket_left(13), 20);
+        assert_eq!(LOG_SCALE.bucket_left(14), 24);
+        assert_eq!(LOG_SCALE.bucket_left(15), 28);
     }
 
     #[test]

@@ -301,12 +301,12 @@ mod tests {
 
         assert_eq!(non_empty.len(), 2);
         assert_eq!(
-            (non_empty[0].min(), non_empty[0].max(), non_empty[0].count()),
-            (5, 5, 1)
+            (non_empty[0].left(), non_empty[0].right(), non_empty[0].count()),
+            (5, 6, 1)
         );
         assert_eq!(
-            (non_empty[1].min(), non_empty[1].max(), non_empty[1].count()),
-            (10, 11, 3)
+            (non_empty[1].left(), non_empty[1].right(), non_empty[1].count()),
+            (10, 12, 3)
         );
     }
 
@@ -429,10 +429,10 @@ mod tests {
         let mut hist: Histogram = Histogram::new();
         hist.record(10);
 
-        assert_eq!(hist.percentile(0.0), 10);
-        assert_eq!(hist.percentile(0.5), 10);
-        assert_eq!(hist.percentile(0.99), 10);
-        assert_eq!(hist.percentile(1.0), 10);
+        assert_eq!(hist.percentile(0.0), 11);
+        assert_eq!(hist.percentile(0.5), 11);
+        assert_eq!(hist.percentile(0.99), 11);
+        assert_eq!(hist.percentile(1.0), 11);
     }
 
     #[test]
@@ -448,7 +448,7 @@ mod tests {
 
         assert_eq!(hist.total(), 100);
 
-        // P50 should be around value 5-6 (bucket returns min value)
+        // P50 should be around value 5-6 (bucket returns left boundary)
         let p50 = hist.percentile(0.5);
         assert!((4..=6).contains(&p50), "P50 = {p50}");
 
@@ -458,7 +458,7 @@ mod tests {
 
         // P99 should be around value 10
         let p99 = hist.percentile(0.99);
-        assert!((8..=10).contains(&p99), "P99 = {p99}");
+        assert!((9..=11).contains(&p99), "P99 = {p99}");
     }
 
     #[test]
@@ -472,9 +472,9 @@ mod tests {
         let stats = hist.percentile_stats();
 
         // Due to logarithmic bucketing, values are grouped
-        // P50 around 50, bucket min value might be 48
+        // P50 around 50, bucket left boundary might be 48
         assert!(stats.p50 >= 48 && stats.p50 <= 52, "P50 = {}", stats.p50);
-        // P90 around 90, bucket min value might be 80
+        // P90 around 90, bucket left boundary might be 80
         assert!(stats.p90 >= 80 && stats.p90 <= 92, "P90 = {}", stats.p90);
         // P99 around 99, interpolated within bucket [96, 111]
         assert!(stats.p99 >= 96 && stats.p99 <= 112, "P99 = {}", stats.p99);
@@ -497,7 +497,7 @@ mod tests {
         let p50 = hist.percentile(0.5);
         assert!((96..=104).contains(&p50), "P50 = {p50}");
 
-        // P80 should be the 4th value (1000), but bucket returns min value
+        // P80 should be the 4th value (1000), but bucket returns left boundary
         let p80 = hist.percentile(0.8);
         assert!((896..=1000).contains(&p80), "P80 = {p80}");
     }

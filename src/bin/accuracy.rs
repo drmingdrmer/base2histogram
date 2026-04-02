@@ -98,6 +98,27 @@ fn evaluate<const WIDTH: usize>(dist: &Distribution, log_scale: &'static LogScal
     errors
 }
 
+/// Evaluate without printing — for `--summary` mode.
+fn evaluate_silent<const WIDTH: usize>(dist: &Distribution, log_scale: &'static LogScale<WIDTH>) -> Vec<f64> {
+    let mut hist = Histogram::<(), WIDTH>::with_log_scale(log_scale, 1);
+    for &v in &dist.values {
+        hist.record(v);
+    }
+
+    PERCENTILES
+        .iter()
+        .map(|&(p, _)| {
+            let exact = exact_percentile(&dist.sorted, p);
+            let estimated = hist.percentile(p);
+            if exact == 0 {
+                0.0
+            } else {
+                ((exact as f64 - estimated as f64) / exact as f64 * 100.0).abs()
+            }
+        })
+        .collect()
+}
+
 fn generate_distributions(n: usize) -> Vec<Distribution> {
     let mut rng = Rng::new(12345);
     let mut dists = Vec::new();
@@ -181,6 +202,26 @@ struct WidthResult {
     errors: Vec<Vec<f64>>,
 }
 
+macro_rules! run_width_silent {
+    ($width:expr, $scale:expr, $distributions:expr, $results:expr) => {{
+        let log_scale: &'static LogScale<{ $width }> = &$scale;
+        let buckets = LogScaleConfig::<{ $width }>::BUCKETS;
+        let memory_bytes = 2 * buckets * size_of::<u64>();
+
+        let mut errors: Vec<Vec<f64>> = Vec::new();
+        for dist in $distributions.iter() {
+            errors.push(evaluate_silent(dist, log_scale));
+        }
+
+        $results.push(WidthResult {
+            width: $width,
+            buckets,
+            memory_bytes,
+            errors,
+        });
+    }};
+}
+
 macro_rules! run_width {
     ($width:expr, $scale:expr, $distributions:expr, $results:expr) => {{
         let log_scale: &'static LogScale<{ $width }> = &$scale;
@@ -212,20 +253,35 @@ macro_rules! run_width {
 }
 
 fn main() {
-    println!("=== base2histogram Percentile Accuracy Report ===");
+    let summary_only = std::env::args().any(|a| a == "--summary");
+
+    if !summary_only {
+        println!("=== base2histogram Percentile Accuracy Report ===");
+    }
 
     let n = 1_000_000usize;
-    println!("\nGenerating {n} samples per distribution...");
+    if !summary_only {
+        println!("\nGenerating {n} samples per distribution...");
+    }
     let distributions = generate_distributions(n);
 
     let mut results: Vec<WidthResult> = Vec::new();
 
-    run_width!(1, SCALE_1, &distributions, &mut results);
-    run_width!(2, SCALE_2, &distributions, &mut results);
-    run_width!(3, SCALE_3, &distributions, &mut results);
-    run_width!(4, SCALE_4, &distributions, &mut results);
-    run_width!(5, SCALE_5, &distributions, &mut results);
-    run_width!(6, SCALE_6, &distributions, &mut results);
+    if summary_only {
+        run_width_silent!(1, SCALE_1, &distributions, &mut results);
+        run_width_silent!(2, SCALE_2, &distributions, &mut results);
+        run_width_silent!(3, SCALE_3, &distributions, &mut results);
+        run_width_silent!(4, SCALE_4, &distributions, &mut results);
+        run_width_silent!(5, SCALE_5, &distributions, &mut results);
+        run_width_silent!(6, SCALE_6, &distributions, &mut results);
+    } else {
+        run_width!(1, SCALE_1, &distributions, &mut results);
+        run_width!(2, SCALE_2, &distributions, &mut results);
+        run_width!(3, SCALE_3, &distributions, &mut results);
+        run_width!(4, SCALE_4, &distributions, &mut results);
+        run_width!(5, SCALE_5, &distributions, &mut results);
+        run_width!(6, SCALE_6, &distributions, &mut results);
+    }
 
     // --- Summary chart ---
 

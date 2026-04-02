@@ -32,7 +32,7 @@ impl<T, const WIDTH: usize> fmt::Display for CompactDisplay<'_, T, WIDTH> {
             .iter()
             .map(|&i| {
                 let b = h0.bucket(i);
-                compact_range_width(b.min(), b.max())
+                compact_range_width(b.left(), b.right())
             })
             .max()
             .unwrap_or(0);
@@ -43,15 +43,11 @@ impl<T, const WIDTH: usize> fmt::Display for CompactDisplay<'_, T, WIDTH> {
             }
 
             let b = h0.bucket(bucket_i);
-            let this_width = compact_range_width(b.min(), b.max());
+            let this_width = compact_range_width(b.left(), b.right());
             for _ in this_width..range_width {
                 f.write_char(' ')?;
             }
-            if b.min() == b.max() {
-                write!(f, "{}  ", b.min())?;
-            } else {
-                write!(f, "{}-{}  ", b.min(), b.max())?;
-            }
+            write!(f, "[{},{})  ", b.left(), b.right())?;
 
             self.chart.write_bar(f, bucket_i, max_count)?;
 
@@ -72,13 +68,9 @@ impl<T, const WIDTH: usize> fmt::Display for CompactDisplay<'_, T, WIDTH> {
     }
 }
 
-/// Width of `"min-max"` or `"min"` when min==max, without allocating.
-fn compact_range_width(min: u64, max: u64) -> usize {
-    if min == max {
-        digit_count(min)
-    } else {
-        digit_count(min) + 1 + digit_count(max) // "min-max"
-    }
+/// Width of `"[left,right)"` without allocating.
+fn compact_range_width(left: u64, right: u64) -> usize {
+    1 + digit_count(left) + 1 + digit_count(right) + 1 // "[left,right)"
 }
 
 #[cfg(test)]
@@ -93,7 +85,7 @@ mod tests {
         hist.record_n(100, 3);
 
         let chart = AsciiChart::new().add("test", hist.clone()).bar_width(20);
-        let expect = ["     5  ████████████████████ 10", "96-111  ██████ 3"].join("\n");
+        let expect = ["   [5,6)  ████████████████████ 10", "[96,112)  ██████ 3"].join("\n");
         assert_eq!(chart.compact().to_string(), expect);
     }
 
@@ -105,7 +97,7 @@ mod tests {
         hist_b.record_n(5, 5);
 
         let chart = AsciiChart::new().add("a", hist_a).add("b", hist_b).bar_width(20);
-        assert_eq!(chart.compact().to_string(), "5  █████████████▒▒▒▒▒▒▒  a:10 b:5");
+        assert_eq!(chart.compact().to_string(), "[5,6)  █████████████▒▒▒▒▒▒▒  a:10 b:5");
     }
 
     #[test]
@@ -114,12 +106,12 @@ mod tests {
         hist.record_n(5, 10);
 
         let chart_narrow = AsciiChart::new().add("test", hist.clone()).bar_width(10);
-        assert_eq!(chart_narrow.compact().to_string(), "5  ██████████ 10");
+        assert_eq!(chart_narrow.compact().to_string(), "[5,6)  ██████████ 10");
 
         let chart_wide = AsciiChart::new().add("test", hist.clone()).bar_width(50);
         assert_eq!(
             chart_wide.compact().to_string(),
-            "5  ██████████████████████████████████████████████████ 10"
+            "[5,6)  ██████████████████████████████████████████████████ 10"
         );
     }
 }

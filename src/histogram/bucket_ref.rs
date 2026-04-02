@@ -3,7 +3,7 @@ use super::log_scale::LogScale;
 /// A lazy reference to a single bucket in a histogram.
 ///
 /// Holds a reference to the log scale and the bucket index.
-/// Min/max values are computed only when the corresponding method is called.
+/// Left/right boundary values are computed only when the corresponding method is called.
 #[derive(Debug, Clone, Copy)]
 pub struct BucketRef<'a, const WIDTH: usize> {
     log_scale: &'a LogScale<WIDTH>,
@@ -20,14 +20,14 @@ impl<'a, const WIDTH: usize> BucketRef<'a, WIDTH> {
         }
     }
 
-    /// The minimum value that maps to this bucket.
-    pub fn min(&self) -> u64 {
-        self.log_scale.bucket_min_value(self.index)
+    /// The left close value that maps to this bucket.
+    pub fn left(&self) -> u64 {
+        self.log_scale.bucket_left(self.index)
     }
 
-    /// The maximum value that maps to this bucket.
-    pub fn max(&self) -> u64 {
-        self.log_scale.bucket_max_value(self.index)
+    /// The right open boundary that maps to this bucket.
+    pub fn right(&self) -> u64 {
+        self.log_scale.bucket_right(self.index)
     }
 
     /// The number of samples recorded in this bucket.

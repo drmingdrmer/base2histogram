@@ -29,9 +29,9 @@ impl<T, const WIDTH: usize> fmt::Display for DetailedDisplay<'_, T, WIDTH> {
         let single = self.chart.series.len() == 1;
         let h0 = &self.chart.series[0].histogram;
 
-        let max_min_width = indices.iter().map(|&i| digit_count(h0.bucket(i).min())).max().unwrap_or(1);
-        let max_max_width = indices.iter().map(|&i| digit_count(h0.bucket(i).max())).max().unwrap_or(1);
-        let range_col_width = max_min_width + max_max_width + 4;
+        let max_left_width = indices.iter().map(|&i| digit_count(h0.bucket(i).left())).max().unwrap_or(1);
+        let max_right_width = indices.iter().map(|&i| digit_count(h0.bucket(i).right())).max().unwrap_or(1);
+        let range_col_width = max_left_width + max_right_width + 4;
 
         // Header
         if single {
@@ -50,11 +50,11 @@ impl<T, const WIDTH: usize> fmt::Display for DetailedDisplay<'_, T, WIDTH> {
 
             write!(
                 f,
-                "[{:>w1$}, {:>w2$}] | ",
-                b.min(),
-                b.max(),
-                w1 = max_min_width,
-                w2 = max_max_width
+                "[{:>w1$}, {:>w2$}) | ",
+                b.left(),
+                b.right(),
+                w1 = max_left_width,
+                w2 = max_right_width
             )?;
 
             self.chart.write_bar(f, bucket_i, max_count)?;
@@ -121,8 +121,8 @@ mod tests {
         let chart = AsciiChart::new().add("test", hist).bar_width(20);
         let expect = [
             "    range | count",
-            "[ 5,   5] | ████████████████████ 10",
-            "[96, 111] | ██████ 3",
+            "[ 5,   6) | ████████████████████ 10",
+            "[96, 112) | ██████ 3",
             "total: 13  P50: 5  P90: 106  P99: 111",
         ]
         .join("\n");
@@ -140,8 +140,8 @@ mod tests {
         let chart = AsciiChart::new().add("a", hist_a).add("b", hist_b).bar_width(20);
         let expect = [
             "    range | █ a ▒ b",
-            "[ 5,   5] | █████████████▒▒▒▒▒▒▒  10 + 5",
-            "[96, 111] | ▒▒▒▒  0 + 3",
+            "[ 5,   6) | █████████████▒▒▒▒▒▒▒  10 + 5",
+            "[96, 112) | ▒▒▒▒  0 + 3",
             "█ a  total: 10  P50: 5  P90: 5  P99: 5",
             "▒ b  total: 8  P50: 5  P90: 111  P99: 111",
         ]
