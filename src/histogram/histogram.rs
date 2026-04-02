@@ -90,13 +90,8 @@ impl<T> Histogram<T> {
 
     /// Creates a new histogram with the specified slot limit.
     ///
-    /// # Arguments
-    ///
-    /// * `slot_limit` - Maximum number of active slots.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `slot_limit` is 0.
+    /// When `slot_limit` is 0 or 1, no individual slots are maintained —
+    /// the aggregate buckets are the sole source of truth.
     pub fn with_slots(slot_limit: usize) -> Self {
         Self::with_log_scale(&LOG_SCALE, slot_limit)
     }
@@ -105,17 +100,9 @@ impl<T> Histogram<T> {
 impl<T, const WIDTH: usize> Histogram<T, WIDTH> {
     /// Creates a new histogram with custom log scale and slot limit.
     ///
-    /// # Arguments
-    ///
-    /// * `log_scale` - Log scale for value-to-bucket mapping.
-    /// * `slot_limit` - Maximum number of active slots.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `slot_limit` is 0.
+    /// When `slot_limit` is 0 or 1, no individual slots are maintained —
+    /// the aggregate buckets are the sole source of truth.
     pub fn with_log_scale(log_scale: &'static LogScale<WIDTH>, slot_limit: usize) -> Self {
-        assert!(slot_limit > 0, "slot_limit must be at least 1");
-
         let num_buckets = log_scale.num_buckets();
 
         Self {
@@ -133,7 +120,9 @@ impl<T, const WIDTH: usize> Histogram<T, WIDTH> {
     /// Record a value `count` times.
     pub fn record_n(&mut self, value: u64, count: u64) {
         let bucket_index = self.log_scale.calculate_bucket(value);
-        self.slots.back_mut().unwrap().buckets[bucket_index] += count;
+        if self.slots.slot_limit() > 1 {
+            self.slots.back_mut().unwrap().buckets[bucket_index] += count;
+        }
         self.aggregate_buckets[bucket_index] += count;
     }
 
@@ -146,6 +135,11 @@ impl<T, const WIDTH: usize> Histogram<T, WIDTH> {
     /// 2. Push a new slot to the back with the given data
     #[allow(dead_code)]
     pub fn advance(&mut self, data: T) -> usize {
+        if self.slots.slot_limit() <= 1 {
+            self.aggregate_buckets.fill(0);
+            return 0;
+        }
+
         if self.slots.len() == self.slots.slot_limit() {
             // Subtract evicted slot from aggregate
             let evicted = self.slots.pop_front().unwrap();
@@ -295,7 +289,7 @@ mod tests {
     fn test_histogram_default() {
         let hist: Histogram = Histogram::default();
         assert_eq!(hist.slot_limit(), 1);
-        assert_eq!(hist.active_slot_count(), 1);
+        assert_eq!(hist.active_slot_count(), 0);
         assert_eq!(hist.total(), 0);
     }
 
@@ -475,9 +469,12 @@ mod tests {
     #[test]
     fn test_advance_single_slot() {
         let mut hist: Histogram<u64> = Histogram::new();
-        // With capacity=1, advance evicts the old slot and adds new one
-        assert_eq!(hist.advance(10), 1);
-        assert_eq!(hist.current_slot().data, Some(10));
+        // With slot_limit<=1, no slots exist; advance just clears aggregate
+        hist.record(42);
+        assert_eq!(hist.total(), 1);
+        assert_eq!(hist.advance(10), 0);
+        assert_eq!(hist.active_slot_count(), 0);
+        assert_eq!(hist.total(), 0);
     }
 
     #[test]
@@ -614,9 +611,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "slot_limit must be at least 1")]
-    fn test_with_slots_zero_panics() {
-        let _: Histogram = Histogram::with_slots(0);
+    fn test_with_slots_zero_same_as_one() {
+        let mut hist0: Histogram = Histogram::with_slots(0);
+        let mut hist1: Histogram = Histogram::with_slots(1);
+
+        assert_eq!(hist0.active_slot_count(), 0);
+        assert_eq!(hist1.active_slot_count(), 0);
+
+        hist0.record(100);
+        hist1.record(100);
+        assert_eq!(hist0.total(), hist1.total());
+        assert_eq!(hist0.percentile(0.5), hist1.percentile(0.5));
     }
 
     #[test]
@@ -696,6 +701,34 @@ mod tests {
                 assert_eq!(hist.total(), 1);
             }
         };
+    }
+
+    #[test]
+    fn test_single_slot_optimization() {
+        let mut hist: Histogram<u64> = Histogram::new();
+        assert_eq!(hist.active_slot_count(), 0);
+
+        hist.record(100);
+        hist.record(200);
+        assert_eq!(hist.total(), 2);
+
+        // advance clears aggregate, no slots exist
+        hist.advance(1);
+        assert_eq!(hist.total(), 0);
+        assert_eq!(hist.active_slot_count(), 0);
+
+        // record after advance works correctly
+        hist.record(50);
+        assert_eq!(hist.total(), 1);
+        let p50 = hist.percentile(0.5);
+        assert!((48..=52).contains(&p50), "P50 = {p50}");
+
+        // multiple advance cycles
+        hist.advance(2);
+        assert_eq!(hist.total(), 0);
+        hist.record(1000);
+        hist.record(1000);
+        assert_eq!(hist.total(), 2);
     }
 
     test_histogram_width_edge_cases!(test_width_edge_1, 1);

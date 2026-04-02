@@ -17,7 +17,11 @@ pub(crate) struct SlotQueue<T> {
 impl<T> SlotQueue<T> {
     pub(crate) fn new(slot_limit: usize, num_buckets: usize) -> Self {
         let mut slots = VecDeque::with_capacity(slot_limit);
-        slots.push_back(Slot::new(num_buckets));
+        // When slot_limit <= 1, aggregate_buckets is the sole source of truth;
+        // no slots are created.
+        if slot_limit > 1 {
+            slots.push_back(Slot::new(num_buckets));
+        }
 
         Self { slot_limit, slots }
     }
