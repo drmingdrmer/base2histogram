@@ -1,5 +1,6 @@
 mod ascii_chart;
 mod bucket_ref;
+mod bucket_span;
 mod compact_display;
 mod detailed_display;
 #[allow(clippy::module_inception)]

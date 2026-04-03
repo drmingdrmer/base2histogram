@@ -1,5 +1,6 @@
 use std::sync::LazyLock;
 
+use super::bucket_span::BucketSpan;
 use super::log_scale_config::LogScaleConfig;
 
 /// Logarithmic scale with precomputed lookup tables.
@@ -12,7 +13,7 @@ use super::log_scale_config::LogScaleConfig;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogScale<const WIDTH: usize> {
     /// Left boundary value for each bucket index.
-    bucket_min_values: Vec<u64>,
+    pub(crate) bucket_min_values: Vec<u64>,
     /// Cached bucket indices for small values (0-4095).
     small_value_buckets: Vec<u8>,
 }
@@ -53,10 +54,15 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
         Self::total_buckets()
     }
 
+    /// Returns a reference to the bucket geometry at the given index.
+    pub fn bucket_span(&self, index: usize) -> BucketSpan<'_, WIDTH> {
+        BucketSpan::new(self, index)
+    }
+
     /// Returns the left boundary value for the given bucket index.
     #[inline]
-    pub fn bucket_left(&self, bucket: usize) -> u64 {
-        self.bucket_min_values[bucket]
+    pub fn bucket_left(&self, index: usize) -> u64 {
+        self.bucket_span(index).left()
     }
 
     /// Returns the right open boundary value for the given bucket index.
@@ -64,18 +70,14 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
     /// For the last bucket, returns `u64::MAX` since it overflows.
     /// Thus, there is an inaccuracy
     #[inline]
-    pub fn bucket_right(&self, bucket: usize) -> u64 {
-        if bucket + 1 < self.bucket_min_values.len() {
-            self.bucket_min_values[bucket + 1]
-        } else {
-            u64::MAX
-        }
+    pub fn bucket_right(&self, index: usize) -> u64 {
+        self.bucket_span(index).right()
     }
 
     /// Returns the width of the bucket: `right - left`.
     #[inline]
-    pub fn bucket_width(&self, bucket: usize) -> u64 {
-        self.bucket_right(bucket) - self.bucket_left(bucket)
+    pub fn bucket_width(&self, index: usize) -> u64 {
+        self.bucket_span(index).width()
     }
 
     /// Interpolates within a bucket using trapezoidal density estimation.
@@ -86,24 +88,21 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
     /// (first/last) or when count <= 1.
     #[inline]
     pub fn interpolate(&self, bucket: usize, rank: u64, count: u64, c0: u64, c2: u64) -> u64 {
-        let left = self.bucket_min_values[bucket];
-        let right = self.bucket_right(bucket);
-        let range = (right - left) as f64;
+        let span = self.bucket_span(bucket);
 
-        if count <= 1 || range == 1.0 {
-            return left + (right - left) / 2;
+        if count <= 1 || span.width() == 1 {
+            return span.midpoint();
         }
 
         let f = rank as f64 / count as f64;
 
-        // Edge buckets have no prev/next neighbor; use uniform interpolation
         let t = if bucket < 1 || bucket + 1 >= self.bucket_min_values.len() {
             f
         } else {
             self.trapezoidal_t(bucket, f, count, c0, c2)
         };
 
-        (left + (range * t.clamp(0.0, 1.0)) as u64).min(right - 1)
+        (span.left() + (span.width() as f64 * t.clamp(0.0, 1.0)) as u64).min(span.right() - 1)
     }
 
     /// Computes the density slope `k` across three adjacent buckets.
@@ -378,6 +377,39 @@ mod tests {
 
         // Second-to-last bucket (250): step=2^61
         assert_eq!(LOG_SCALE.bucket_width(250), 1 << 61);
+    }
+
+    #[test]
+    fn test_bucket_span() {
+        // Group 0: [0,1)
+        let b = LOG_SCALE.bucket_span(0);
+        assert_eq!(b.index(), 0);
+        assert_eq!(b.left(), 0);
+        assert_eq!(b.right(), 1);
+        assert_eq!(b.width(), 1);
+        assert_eq!(b.midpoint(), 0);
+
+        // Group 2: [8,10)
+        let b = LOG_SCALE.bucket_span(8);
+        assert_eq!(b.index(), 8);
+        assert_eq!(b.left(), 8);
+        assert_eq!(b.right(), 10);
+        assert_eq!(b.width(), 2);
+        assert_eq!(b.midpoint(), 9);
+
+        // Group 3: [16,20)
+        let b = LOG_SCALE.bucket_span(12);
+        assert_eq!(b.index(), 12);
+        assert_eq!(b.left(), 16);
+        assert_eq!(b.right(), 20);
+        assert_eq!(b.width(), 4);
+        assert_eq!(b.midpoint(), 18);
+
+        // Last bucket (251)
+        let b = LOG_SCALE.bucket_span(251);
+        assert_eq!(b.left(), 0b111 << 61);
+        assert_eq!(b.right(), u64::MAX);
+        assert_eq!(b.width(), u64::MAX - (0b111 << 61));
     }
 
     #[test]
