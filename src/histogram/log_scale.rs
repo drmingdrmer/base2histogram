@@ -121,21 +121,13 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
     /// `bucket` must have both a previous and next neighbor (i.e., not the
     /// first or last bucket).
     fn density_slope(&self, bucket: usize, count0: u64, count2: u64) -> f64 {
-        let x0 = self.bucket_min_values[bucket - 1] as f64;
-        let x1 = self.bucket_min_values[bucket] as f64;
-        let x2 = self.bucket_min_values[bucket + 1] as f64;
-        let x3 = self.bucket_right(bucket + 1) as f64;
+        let s0 = self.bucket_span(bucket - 1);
+        let s2 = self.bucket_span(bucket + 1);
 
-        let width0 = x1 - x0;
-        let width2 = x3 - x2;
+        let density0 = count0 as f64 / s0.width() as f64;
+        let density2 = count2 as f64 / s2.width() as f64;
 
-        let density0 = count0 as f64 / width0;
-        let density2 = count2 as f64 / width2;
-
-        let m0 = (x0 + x1) / 2.0;
-        let m2 = (x2 + x3) / 2.0;
-
-        (density2 - density0) / (m2 - m0)
+        (density2 - density0) / (s2.midpoint() as f64 - s0.midpoint() as f64)
     }
 
     /// Computes the trapezoidal interpolation parameter t for a fractional rank f.
