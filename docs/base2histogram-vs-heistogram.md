@@ -6,6 +6,22 @@ Versions compared:
 - base2histogram v0.1.5 ([`08eb806`](https://github.com/drmingdrmer/base2histogram/commit/08eb806), 2026-04-03)
 - Heistogram ([`bef475a`](https://github.com/oldmoe/heistogram/commit/bef475a), 2025-07-27)
 
+## Heistogram Algorithm
+
+Heistogram maps each value `v` to a bucket index using a ~2% growth factor via:
+
+```
+index = (int)(log2(v) * 35.0)
+```
+
+The multiplier 35 means each power-of-2 range is divided into 35 sub-buckets, giving approximately `1/35 ≈ 2.86%` relative bucket width. Values 0–57 are stored in exact 1:1 buckets (58 exact entries), then logarithmic buckets begin.
+
+- **Recording**: one `log2` (implemented via float conversion or bit tricks) + multiply + floor → O(1).
+- **Querying percentile**: linear scan through buckets accumulating counts, then linear interpolation within the target bucket to produce a point estimate.
+- **Merging**: 5 merge variants including merge of serialized data without full deserialization.
+
+The bucket array grows dynamically via `realloc` as larger values arrive — unlike fixed-size histograms, memory is proportional to the observed value range. Heistogram also supports inverse queries (`prank`: "what percentile is value X?"), value removal for manual sliding-window patterns, and a compact varint serialization format that allows computing percentiles directly on serialized data.
+
 ## Summary
 
 | Strength | Winner |

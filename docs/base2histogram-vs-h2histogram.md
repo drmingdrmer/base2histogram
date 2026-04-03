@@ -6,6 +6,24 @@ Versions compared:
 - base2histogram v0.1.5 ([`08eb806`](https://github.com/drmingdrmer/base2histogram/commit/08eb806), 2026-04-03)
 - H2 Histogram v1.0.1-alpha.0 ([`a6958d8`](https://github.com/iopsystems/histogram/commit/a6958d8), 2026-03-20)
 
+## H2 Histogram Algorithm
+
+H2 Histogram uses the same base-2 log-linear bucketing as base2histogram. Each value `v` is mapped to a bucket index using the position of its most significant bit (MSB) and the next `grouping_power` bits:
+
+```
+group = msb_position - grouping_power
+offset = (v >> group) & mask
+index = exact_count + group * group_size + offset
+```
+
+The `grouping_power` parameter (equivalent to `WIDTH - 1` in base2histogram) controls how many sub-buckets exist per power-of-2 range. At `grouping_power = 2`, each doubling of value range is split into 4 sub-buckets, giving 252 total buckets — identical to base2histogram at WIDTH=3.
+
+- **Recording**: `leading_zeros` + shift + offset → O(1), pure integer arithmetic.
+- **Querying percentile**: forward scan through buckets accumulating counts; returns the bucket range `lower..=upper` rather than a point estimate.
+- **Merging**: `checked_add` / `wrapping_add` on corresponding bucket counts.
+
+H2 provides values 0–`2^(grouping_power+1)-1` with exact 1:1 buckets (8 exact buckets at `grouping_power=2`), then logarithmic buckets beyond that. It also offers `AtomicHistogram` for lock-free concurrent recording and `SparseHistogram` for memory-efficient storage of sparse distributions.
+
 ## Summary
 
 These two histograms share nearly identical bucket mapping math — both use base-2 log-linear schemes with the same total bucket count at equivalent configurations. The differences lie in what each builds on top of that shared foundation.
