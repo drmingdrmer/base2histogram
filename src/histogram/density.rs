@@ -46,132 +46,298 @@ impl<'a, T, const WIDTH: usize> Density<'a, T, WIDTH> {
 
         (dr - dl) / (br.midpoint() as f64 - bl.midpoint() as f64)
     }
+
+    /// Computes the cumulative sample count from `bucket.left()` up to
+    /// `bucket.left() + x` using trapezoidal density estimation.
+    ///
+    /// `x` is the offset from the bucket's left boundary.
+    ///
+    /// Models the density inside the bucket as a linear function:
+    ///
+    /// ```text
+    ///   d(x) = a + k·x,  x ∈ [0, width]
+    /// ```
+    ///
+    /// where `a = d1 - k·width/2` is the density at the left edge,
+    /// `k` is the density slope from `density_slope()`,
+    /// and `d1 = count / width` is the average density.
+    ///
+    /// The CDF is:
+    ///
+    /// ```text
+    ///   C(x) = a·x + k·x²/2
+    /// ```
+    pub fn trapezoidal_cdf(&self, bucket: usize, x: u64) -> f64 {
+        let b = self.hist.bucket(bucket);
+        let w = b.width() as f64;
+        let x = x as f64;
+
+        let d1 = b.count() as f64 / w;
+        let k = self.density_slope(bucket);
+
+        // d(x) = a + k·x, where a = d1 - k·w/2 is density at left edge
+        let a = d1 - k * w / 2.0;
+        a * x + k * x * x / 2.0
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Record values and return the density slope at the given bucket.
-    fn slope(records: &[(u64, u64)], bucket: usize) -> f64 {
+    fn make_hist(records: &[(u64, u64)]) -> Histogram<()> {
         let mut hist = Histogram::<()>::new();
         for &(value, count) in records {
             hist.record_n(value, count);
         }
-        Density::new(&hist).density_slope(bucket)
+        hist
     }
 
-    // --- Interior buckets with equal widths ---
+    fn slope(records: &[(u64, u64)], bucket: usize) -> f64 {
+        let h = make_hist(records);
+        Density::new(&h).density_slope(bucket)
+    }
+
+    // === density_slope tests ===
 
     #[test]
-    fn test_equal_width_increasing() {
+    fn test_slope_equal_width() {
         // Buckets 8,9,10: [8,10), [10,12), [12,14) — all width=2, midpoints 9,11,13
-        // d0=10/2=5, d2=30/2=15 → k = (15-5)/(13-9) = 2.5
-        assert!((slope(&[(8, 10), (10, 20), (12, 30)], 9) - 2.5).abs() < 1e-10);
+
+        // increasing: d0=5, d2=15 → k=2.5
+        let k = slope(&[(8, 10), (10, 20), (12, 30)], 9);
+        assert!((k - 2.5).abs() < 1e-10);
+
+        // decreasing: d0=15, d2=5 → k=-2.5
+        let k = slope(&[(8, 30), (10, 20), (12, 10)], 9);
+        assert!((k - (-2.5)).abs() < 1e-10);
+
+        // equal: d0=10, d2=10 → k=0
+        let k = slope(&[(8, 20), (10, 20), (12, 20)], 9);
+        assert!(k.abs() < 1e-10);
     }
 
     #[test]
-    fn test_equal_width_decreasing() {
-        // d0=30/2=15, d2=10/2=5 → k = -2.5
-        assert!((slope(&[(8, 30), (10, 20), (12, 10)], 9) - (-2.5)).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_equal_counts_zero_slope() {
-        // d0=20/2=10, d2=20/2=10 → k=0
-        assert!(slope(&[(8, 20), (10, 20), (12, 20)], 9).abs() < 1e-10);
-    }
-
-    // --- Interior buckets with unequal widths ---
-
-    #[test]
-    fn test_unequal_widths_equal_density() {
-        // Bucket 11: [14,16) w=2, Bucket 13: [20,24) w=4
-        // c0=4, c2=8 → d0=2, d2=2 → k=0
-        assert!(slope(&[(14, 4), (16, 1), (20, 8)], 12).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_unequal_widths_nonzero_slope() {
+    fn test_slope_unequal_width() {
         // Bucket 11: [14,16) w=2 mid=15, Bucket 13: [20,24) w=4 mid=22
+
+        // c0=4, c2=8 → d0=2, d2=2 → k=0
+        let k = slope(&[(14, 4), (16, 1), (20, 8)], 12);
+        assert!(k.abs() < 1e-10);
+
         // c0=2, c2=8 → d0=1, d2=2 → k=(2-1)/(22-15)=1/7
-        assert!((slope(&[(14, 2), (16, 1), (20, 8)], 12) - 1.0 / 7.0).abs() < 1e-10);
-    }
-
-    // --- Edge: first and last buckets ---
-
-    #[test]
-    fn test_first_bucket() {
-        // Bucket 0: [0,1) w=1 mid=0, Bucket 1: [1,2) w=1 mid=1
-        // Uses (self=0, right=1): k = (30-10)/(1-0) = 20
-        assert!((slope(&[(0, 10), (1, 30)], 0) - 20.0).abs() < 1e-10);
+        let k = slope(&[(14, 2), (16, 1), (20, 8)], 12);
+        assert!((k - 1.0 / 7.0).abs() < 1e-10);
     }
 
     #[test]
-    fn test_last_bucket() {
-        // Bucket 250: [0b110<<61, 0b111<<61) w=1<<61
-        // Bucket 251: [0b111<<61, u64::MAX)  w=u64::MAX-(0b111<<61)
-        // Uses (left=250, self=251)
-        let k = slope(&[(0b110 << 61, 100), (0b111 << 61, 200)], 251);
+    fn test_slope_edge_buckets() {
+        // First bucket: uses (self=0, right=1) → k=(30-10)/(1-0)=20
+        let k = slope(&[(0, 10), (1, 30)], 0);
+        assert!((k - 20.0).abs() < 1e-10);
 
+        // Second bucket: interior, uses (0, 2) → k=(30-10)/(2-0)=10
+        let k = slope(&[(0, 10), (1, 20), (2, 30)], 1);
+        assert!((k - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_slope_last_buckets() {
         let w250: f64 = (1u128 << 61) as f64;
         let w251: f64 = (u64::MAX - (0b111 << 61)) as f64;
         let m250: f64 = (0b110u128 << 61) as f64 + w250 / 2.0;
         let m251: f64 = (0b111u128 << 61) as f64 + w251 / 2.0;
+
+        // Last bucket (251): uses (left=250, self=251)
+        let k = slope(&[(0b110 << 61, 100), (0b111 << 61, 200)], 251);
         let expected = (200.0 / w251 - 100.0 / w250) / (m251 - m250);
-        assert!(
-            (k - expected).abs() / expected.abs() < 1e-10,
-            "k = {k}, expected = {expected}"
-        );
-    }
+        assert!((k - expected).abs() / expected.abs() < 1e-10);
 
-    // --- Near-edge interior buckets ---
-
-    #[test]
-    fn test_second_bucket() {
-        // Buckets 0,1,2: [0,1), [1,2), [2,3) — all w=1, midpoints 0,1,2
-        // Uses (left=0, right=2) → k=(30-10)/(2-0)=10
-        assert!((slope(&[(0, 10), (1, 20), (2, 30)], 1) - 10.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_second_to_last_bucket() {
-        // Bucket 249: [0b101<<61, 0b110<<61) w=1<<61
-        // Bucket 251: [0b111<<61, u64::MAX)  w=u64::MAX-(0b111<<61)
-        // Interior bucket 250: uses (left=249, right=251)
+        // Second-to-last (250): interior, uses (249, 251)
         let k = slope(&[(0b101 << 61, 100), (0b111 << 61, 200)], 250);
-
-        let w249: f64 = (1u128 << 61) as f64;
-        let w251: f64 = (u64::MAX - (0b111 << 61)) as f64;
-        let m249: f64 = (0b101u128 << 61) as f64 + w249 / 2.0;
-        let m251: f64 = (0b111u128 << 61) as f64 + w251 / 2.0;
-        let expected = (200.0 / w251 - 100.0 / w249) / (m251 - m249);
-        assert!(
-            (k - expected).abs() / expected.abs() < 1e-10,
-            "k = {k}, expected = {expected}"
-        );
-    }
-
-    // --- Zero-count cases ---
-
-    #[test]
-    fn test_zero_counts() {
-        // All empty → k=0 for any bucket position
-        assert!(slope(&[], 0).abs() < 1e-10);
-        assert!(slope(&[], 9).abs() < 1e-10);
-        assert!(slope(&[], 251).abs() < 1e-10);
+        let m249: f64 = (0b101u128 << 61) as f64 + (1u128 << 61) as f64 / 2.0;
+        let expected = (200.0 / w251 - 100.0 / w250) / (m251 - m249);
+        assert!((k - expected).abs() / expected.abs() < 1e-10);
     }
 
     #[test]
-    fn test_one_empty_neighbor() {
-        // Bucket 8: [8,10) c=0, Bucket 10: [12,14) c=20
-        // d0=0, d2=20/2=10 → k = (10-0)/(13-9) = 2.5
-        assert!((slope(&[(10, 5), (12, 20)], 9) - 2.5).abs() < 1e-10);
+    fn test_slope_zero_counts() {
+        let k = slope(&[], 0);
+        assert!(k.abs() < 1e-10);
+
+        let k = slope(&[], 9);
+        assert!(k.abs() < 1e-10);
+
+        let k = slope(&[], 251);
+        assert!(k.abs() < 1e-10);
+
+        // One empty neighbor: d0=0, d2=20/2=10 → k=(10-0)/(13-9)=2.5
+        let k = slope(&[(10, 5), (12, 20)], 9);
+        assert!((k - 2.5).abs() < 1e-10);
+
+        // Both neighbors empty → k=0
+        let k = slope(&[(10, 50)], 9);
+        assert!(k.abs() < 1e-10);
+    }
+
+    // === trapezoidal_cdf tests ===
+
+    fn cdf(records: &[(u64, u64)], bucket: usize, x: u64) -> f64 {
+        let h = make_hist(records);
+        Density::new(&h).trapezoidal_cdf(bucket, x)
     }
 
     #[test]
-    fn test_both_neighbors_empty() {
-        // Only the target bucket has data, neighbors are 0 → k=0
-        assert!(slope(&[(10, 50)], 9).abs() < 1e-10);
+    fn test_cdf_at_boundaries() {
+        // Bucket 9: [10,12) count=20, width=2
+        let r = &[(8, 10), (10, 20), (12, 30)];
+
+        let c_left = cdf(r, 9, 0);
+        assert!(c_left.abs() < 1e-10);
+
+        let c_right = cdf(r, 9, 2);
+        assert!((c_right - 20.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cdf_uniform_density() {
+        // Equal neighbors → uniform → cdf(x) = count * x / width
+        // Bucket 9: [10,12) count=20, width=2
+        let r = &[(8, 20), (10, 20), (12, 20)];
+
+        let c_mid = cdf(r, 9, 1);
+        assert!((c_mid - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cdf_slope_direction() {
+        // Bucket 9: [10,12) width=2, midpoint at x=1
+        // Increasing density: less area on left half → cdf(midpoint) < count/2
+        let c = cdf(&[(8, 10), (10, 20), (12, 30)], 9, 1);
+        assert!(c < 10.0);
+        assert!(c > 0.0);
+
+        // Decreasing density: more area on left half → cdf(midpoint) > count/2
+        let c = cdf(&[(8, 30), (10, 20), (12, 10)], 9, 1);
+        assert!(c > 10.0);
+        assert!(c < 20.0);
+    }
+
+    #[test]
+    fn test_cdf_monotonicity() {
+        // Bucket 12: [16,20) width=4
+        let r = &[(14, 10), (16, 50), (20, 30)];
+        let mut prev = 0.0;
+        for x in 0..=4 {
+            let c = cdf(r, 12, x);
+            assert!(c >= prev, "cdf({x}) = {c} < prev = {prev}");
+            prev = c;
+        }
+    }
+
+    #[test]
+    fn test_cdf_zero_count() {
+        let c = cdf(&[], 9, 1);
+        assert!(c.abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cdf_first_bucket() {
+        // Bucket 0: [0,1) width=1
+        // Uses (self=0, right=1) for slope
+        let r = &[(0, 10), (1, 30)];
+
+        let c = cdf(r, 0, 0);
+        assert!(c.abs() < 1e-10);
+
+        let c = cdf(r, 0, 1);
+        assert!((c - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cdf_last_bucket() {
+        // Bucket 251: [0b111<<61, u64::MAX)
+        // Uses (left=250, self=251) for slope
+        let r = &[(0b110 << 61, 100), (0b111 << 61, 200)];
+
+        let c = cdf(r, 251, 0);
+        assert!(c.abs() < 1e-10);
+
+        let w251 = u64::MAX - (0b111 << 61);
+        let c = cdf(r, 251, w251);
+        assert!((c - 200.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cdf_one_neighbor_empty() {
+        // Bucket 9: [10,12) width=2, count=20
+        // Left neighbor (bucket 8) empty, right neighbor count=30
+        // Slope from (8,10): d0=0, d2=30/2=15 → k=(15-0)/(13-9)=3.75
+        let r = &[(10, 20), (12, 30)];
+
+        let c = cdf(r, 9, 0);
+        assert!(c.abs() < 1e-10);
+
+        let c = cdf(r, 9, 2);
+        assert!((c - 20.0).abs() < 1e-10);
+
+        // With positive slope, cdf(midpoint) < count/2
+        let c = cdf(r, 9, 1);
+        assert!(c < 10.0);
+        assert!(c > 0.0);
+    }
+
+    #[test]
+    fn test_cdf_both_neighbors_empty() {
+        // Only target bucket has data → k=0 → uniform
+        // Bucket 9: [10,12) width=2, count=50
+        let r = &[(10, 50)];
+
+        let c = cdf(r, 9, 1);
+        assert!((c - 25.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cdf_large_count() {
+        // Bucket 9: [10,12) width=2, count=1_000_000
+        let r = &[(8, 500_000), (10, 1_000_000), (12, 500_000)];
+
+        let c = cdf(r, 9, 0);
+        assert!(c.abs() < 1e-10);
+
+        let c = cdf(r, 9, 2);
+        assert!((c - 1_000_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cdf_wider_bucket() {
+        // Bucket 12: [16,20) width=4, count=40
+        // Neighbors: bucket 11 [14,16) c=20, bucket 13 [20,24) c=60
+        // d0=20/2=10, d2=60/4=15, midpoints 15 and 22
+        // k=(15-10)/(22-15)=5/7
+        let r = &[(14, 20), (16, 40), (20, 60)];
+
+        let c = cdf(r, 12, 0);
+        assert!(c.abs() < 1e-10);
+
+        let c = cdf(r, 12, 4);
+        assert!((c - 40.0).abs() < 1e-10);
+
+        // Positive slope → cdf(midpoint) < count/2
+        let c = cdf(r, 12, 2);
+        assert!(c < 20.0);
+        assert!(c > 0.0);
+    }
+
+    #[test]
+    fn test_cdf_symmetry() {
+        // Symmetric neighbors → uniform → cdf at midpoint = count/2
+        // Bucket 12: [16,20) width=4, count=100
+        // Neighbors: bucket 11 c=50 w=2, bucket 13 c=100 w=4
+        // d0=50/2=25, d2=100/4=25 → equal density → k=0
+        let r = &[(14, 50), (16, 100), (20, 100)];
+
+        let c = cdf(r, 12, 2);
+        assert!((c - 50.0).abs() < 1e-10);
     }
 }
