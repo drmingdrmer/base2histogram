@@ -128,6 +128,11 @@ Distributions: Uniform [0, 1M], Log-normal API latency (σ=0.5),
 Bimodal cache hit/miss (90/10), Exponential IO wait, Log-normal DB query
 (σ=1.0), Sequential [1..N], Pareto heavy tail (α=1.5).
 
+## Comparison Notes
+
+- [base2histogram vs Heistogram](docs/base2histogram-vs-heistogram.md)
+- [base2histogram vs H2 Histogram](docs/base2histogram-vs-h2histogram.md)
+
 ## License
 
 Licensed under Apache-2.0. See [LICENSE](./LICENSE).
