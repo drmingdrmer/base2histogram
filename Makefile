@@ -18,7 +18,7 @@ lint: fmt clippy-fix
 doc:
 	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
 
-check: fmt-check lint test doc
+check: lint fmt-check test doc
 
 clean:
 	cargo clean

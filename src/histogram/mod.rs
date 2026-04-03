@@ -2,6 +2,7 @@ mod ascii_chart;
 mod bucket_ref;
 mod bucket_span;
 mod compact_display;
+mod density;
 mod detailed_display;
 #[allow(clippy::module_inception)]
 mod histogram;
@@ -14,6 +15,7 @@ mod slot_queue;
 
 pub use ascii_chart::AsciiChart;
 pub use bucket_ref::BucketRef;
+pub use density::Density;
 pub use histogram::Histogram;
 #[allow(unused_imports)]
 pub use log_scale::LOG_SCALE;
