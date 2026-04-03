@@ -74,10 +74,14 @@ assert_eq!(stats.p90, 87);
 
 ## Percentile Accuracy
 
-`percentile()` uses **trapezoidal density interpolation**: it examines
-neighboring bucket counts to estimate a density gradient across the target
-bucket, then solves the inverse CDF to pinpoint the value within the bucket.
-This requires no additional storage beyond the bucket array itself.
+**Trapezoidal interpolation** vs returning bucket midpoint (log-normal API latency, WIDTH=3, 1M samples):
+
+| Method | P50 | P95 | P99 |
+|--------|-----|-----|-----|
+| midpoint | 5.018% | 7.732% | 4.861% |
+| trapezoidal | 0.000% | 0.080% | 0.086% |
+
+The interpolation estimates a density gradient from neighbor buckets and solves the inverse CDF — no extra storage needed.
 
 The `WIDTH` parameter controls bucket granularity: each bucket group uses
 `WIDTH` bits, giving `2^(WIDTH-1)` buckets per group. Higher `WIDTH` means
@@ -127,6 +131,10 @@ Error = `|exact - estimated| / exact × 100%`, shown at P50 / P95 / P99:
 Distributions: Uniform [0, 1M], Log-normal API latency (σ=0.5),
 Bimodal cache hit/miss (90/10), Exponential IO wait, Log-normal DB query
 (σ=1.0), Sequential [1..N], Pareto heavy tail (α=1.5).
+
+## Algorithm
+
+See [Algorithm](docs/algorithm.md) for a detailed description of the float-like bucket encoding, trapezoidal interpolation, and error bound analysis.
 
 ## Comparison Notes
 
