@@ -1,6 +1,6 @@
 # base2histogram vs Heistogram: Comparison
 
-Comparison of [base2histogram](https://github.com/drmingdrmer/base2histogram) (Rust) and [Heistogram](https://github.com/oldmoe/heistogram) (C).
+Comparison of [base2histogram](https://github.com/drmingdrmer/base2histogram) ([intro](https://blog.openacid.com/algo/histogram/), Rust) and [Heistogram](https://github.com/oldmoe/heistogram) ([intro](https://oldmoe.blog/2025/03/03/heistogram-nanosecond-quantile-queries-for-data-intensive-applications/), C).
 
 Versions compared:
 - base2histogram v0.1.5 ([`08eb806`](https://github.com/drmingdrmer/base2histogram/commit/08eb806), 2026-04-03)
