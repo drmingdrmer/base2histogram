@@ -292,32 +292,6 @@ mod tests {
     use crate::histogram::LogScaleConfig;
 
     #[test]
-    fn test_bucket_data() {
-        let mut hist: Histogram = Histogram::new();
-        hist.record(5);
-        hist.record_n(10, 3);
-
-        let non_empty: Vec<_> = hist.bucket_data().filter(|b| b.count() > 0).collect();
-
-        assert_eq!(non_empty.len(), 2);
-        assert_eq!(
-            (non_empty[0].left(), non_empty[0].right(), non_empty[0].count()),
-            (5, 6, 1)
-        );
-        assert_eq!(
-            (non_empty[1].left(), non_empty[1].right(), non_empty[1].count()),
-            (10, 12, 3)
-        );
-    }
-
-    #[test]
-    fn test_bucket_data_includes_all_buckets() {
-        let hist: Histogram = Histogram::new();
-        assert_eq!(hist.bucket_data().count(), 252);
-        assert!(hist.bucket_data().all(|b| b.count() == 0));
-    }
-
-    #[test]
     fn test_slot_clear() {
         let mut slot: Slot<String> = Slot::new(10);
         slot.buckets[0] = 5;

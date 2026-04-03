@@ -9,7 +9,10 @@ fmt:
 fmt-check:
 	cargo fmt --all -- --check
 
-lint:
+clippy-fix:
+	cargo clippy --fix --allow-dirty --allow-staged
+
+lint: fmt clippy-fix
 	cargo clippy --all-targets --all-features -- -D warnings
 
 doc:
