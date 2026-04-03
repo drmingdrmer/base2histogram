@@ -72,6 +72,12 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
         }
     }
 
+    /// Returns the width of the bucket: `right - left`.
+    #[inline]
+    pub fn bucket_width(&self, bucket: usize) -> u64 {
+        self.bucket_right(bucket) - self.bucket_left(bucket)
+    }
+
     /// Interpolates within a bucket using trapezoidal density estimation.
     ///
     /// Uses neighbor bucket densities to estimate a linear density gradient
@@ -343,6 +349,35 @@ mod tests {
         assert_eq!(LOG_SCALE.bucket_left(13), 20);
         assert_eq!(LOG_SCALE.bucket_left(14), 24);
         assert_eq!(LOG_SCALE.bucket_left(15), 28);
+    }
+
+    #[test]
+    fn test_bucket_width() {
+        // Group 0: single-value buckets, width=1
+        assert_eq!(LOG_SCALE.bucket_width(0), 1); // [0,1)
+        assert_eq!(LOG_SCALE.bucket_width(1), 1); // [1,2)
+        assert_eq!(LOG_SCALE.bucket_width(3), 1); // [3,4)
+
+        // Group 1: still width=1
+        assert_eq!(LOG_SCALE.bucket_width(4), 1); // [4,5)
+        assert_eq!(LOG_SCALE.bucket_width(7), 1); // [7,8)
+
+        // Group 2: width=2
+        assert_eq!(LOG_SCALE.bucket_width(8), 2); // [8,10)
+        assert_eq!(LOG_SCALE.bucket_width(11), 2); // [14,16)
+
+        // Group 3: width=4
+        assert_eq!(LOG_SCALE.bucket_width(12), 4); // [16,20)
+        assert_eq!(LOG_SCALE.bucket_width(15), 4); // [28,32)
+
+        // Group 4: width=8
+        assert_eq!(LOG_SCALE.bucket_width(16), 8); // [32,40)
+
+        // Last bucket (251): right=u64::MAX, left=0b111<<61
+        assert_eq!(LOG_SCALE.bucket_width(251), u64::MAX - (0b111 << 61));
+
+        // Second-to-last bucket (250): step=2^61
+        assert_eq!(LOG_SCALE.bucket_width(250), 1 << 61);
     }
 
     #[test]
