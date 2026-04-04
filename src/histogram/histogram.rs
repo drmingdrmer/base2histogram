@@ -1,4 +1,5 @@
 use super::bucket_ref::BucketRef;
+use super::cumulative_count::CumulativeCount;
 use super::density::Density;
 use super::log_scale::LOG_SCALE;
 use super::log_scale::LogScale;
@@ -286,6 +287,12 @@ impl<T, const WIDTH: usize> Histogram<T, WIDTH> {
     /// Returns the number of buckets.
     pub const fn num_buckets(&self) -> usize {
         Self::total_buckets()
+    }
+
+    /// Returns an incremental cursor for computing cumulative counts
+    /// at monotonically increasing positions.
+    pub fn cumulative_count(&self) -> CumulativeCount<'_, T, WIDTH> {
+        CumulativeCount::new(self)
     }
 
     /// Returns a lazy reference to the bucket at the given index.

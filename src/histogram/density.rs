@@ -4,8 +4,9 @@ use super::histogram::Histogram;
 ///
 /// Provides derived calculations such as density slopes and trapezoidal
 /// interpolation, without modifying the underlying histogram.
+#[derive(Clone, Copy)]
 pub struct Density<'a, T = (), const WIDTH: usize = 3> {
-    hist: &'a Histogram<T, WIDTH>,
+    pub(super) hist: &'a Histogram<T, WIDTH>,
 }
 
 impl<'a, T, const WIDTH: usize> Density<'a, T, WIDTH> {

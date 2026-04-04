@@ -49,6 +49,7 @@ pub mod histogram;
 
 pub use histogram::AsciiChart;
 pub use histogram::BucketRef;
+pub use histogram::CumulativeCount;
 pub use histogram::DefaultLogScaleConfig;
 pub use histogram::Histogram;
 pub use histogram::LOG_SCALE;
