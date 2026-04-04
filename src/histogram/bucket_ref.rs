@@ -16,7 +16,7 @@ pub struct BucketRef<'a, const WIDTH: usize> {
 
 impl<const WIDTH: usize> fmt::Display for BucketRef<'_, WIDTH> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "[{},{})={}", self.left(), self.right(), self.count())
+        write!(f, "[{:#x},{:#x})={}", self.left(), self.right(), self.count())
     }
 }
 
@@ -145,8 +145,8 @@ mod tests {
 
         let buckets: Vec<_> = hist.bucket_data().filter(|b| b.count() > 0).collect();
 
-        assert_eq!(buckets[0].to_string(), "[5,6)=10");
-        assert_eq!(buckets[1].to_string(), "[96,112)=3");
+        assert_eq!(buckets[0].to_string(), "[0x5,0x6)=10");
+        assert_eq!(buckets[1].to_string(), "[0x60,0x70)=3");
     }
 
     /// Values at exact/log group boundaries: 3→4, 7→8

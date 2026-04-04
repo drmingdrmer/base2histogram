@@ -5,6 +5,7 @@ use super::log_scale::LogScale;
 use super::percentile_stats::PercentileStats;
 use super::slot::Slot;
 use super::slot_queue::SlotQueue;
+use crate::histogram::display_buckets::DisplayBuckets;
 
 /// A histogram for tracking the distribution of u64 values using logarithmic bucketing.
 ///
@@ -290,6 +291,11 @@ impl<T, const WIDTH: usize> Histogram<T, WIDTH> {
     /// Returns a lazy reference to the bucket at the given index.
     pub fn bucket(&self, index: usize) -> BucketRef<'_, WIDTH> {
         BucketRef::new(self.log_scale, index, self.aggregate_buckets[index])
+    }
+
+    /// Returns a display wrapper that prints non-empty buckets, one per line.
+    pub fn display_buckets(&self) -> DisplayBuckets<'_, T, WIDTH> {
+        DisplayBuckets::new(self)
     }
 }
 

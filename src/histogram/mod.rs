@@ -4,6 +4,7 @@ mod bucket_span;
 mod compact_display;
 mod density;
 mod detailed_display;
+mod display_buckets;
 #[allow(clippy::module_inception)]
 mod histogram;
 mod log_scale;
