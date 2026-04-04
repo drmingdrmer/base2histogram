@@ -46,18 +46,18 @@ pub(crate) const BAR_CHARS: [char; 8] = ['█', '▒', '░', '▓', '▞', '▚
 /// total: 8  P50: 10  P90: 111  P99: 111
 /// ```
 #[derive(Debug, Clone)]
-pub struct AsciiChart<T = (), const WIDTH: usize = 3> {
-    pub(crate) series: Vec<Series<T, WIDTH>>,
+pub struct AsciiChart<T = ()> {
+    pub(crate) series: Vec<Series<T>>,
     bar_width: usize,
 }
 
-impl<T, const WIDTH: usize> Default for AsciiChart<T, WIDTH> {
+impl<T> Default for AsciiChart<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T, const WIDTH: usize> AsciiChart<T, WIDTH> {
+impl<T> AsciiChart<T> {
     pub fn new() -> Self {
         Self {
             series: Vec::new(),
@@ -66,7 +66,7 @@ impl<T, const WIDTH: usize> AsciiChart<T, WIDTH> {
     }
 
     /// Creates a chart from named histograms.
-    pub fn from_series(series: impl IntoIterator<Item = (impl ToString, Histogram<T, WIDTH>)>) -> Self {
+    pub fn from_series(series: impl IntoIterator<Item = (impl ToString, Histogram<T>)>) -> Self {
         Self {
             series: series.into_iter().map(|(name, hist)| Series::new(name.to_string(), hist)).collect(),
             bar_width: 40,
@@ -74,7 +74,7 @@ impl<T, const WIDTH: usize> AsciiChart<T, WIDTH> {
     }
 
     /// Adds a histogram as a named series.
-    pub fn add(mut self, name: &str, hist: Histogram<T, WIDTH>) -> Self {
+    pub fn add(mut self, name: &str, hist: Histogram<T>) -> Self {
         self.series.push(Series::new(name, hist));
         self
     }
@@ -86,19 +86,22 @@ impl<T, const WIDTH: usize> AsciiChart<T, WIDTH> {
     }
 
     /// Returns a compact display, rendered lazily via `Display`.
-    pub fn compact(&self) -> CompactDisplay<'_, T, WIDTH> {
+    pub fn compact(&self) -> CompactDisplay<'_, T> {
         CompactDisplay::new(self)
     }
 
     /// Returns a detailed display with header and percentile summary, rendered lazily via
     /// `Display`.
-    pub fn detailed(&self) -> DetailedDisplay<'_, T, WIDTH> {
+    pub fn detailed(&self) -> DetailedDisplay<'_, T> {
         DetailedDisplay::new(self)
     }
 
     /// Bucket indices where at least one series has count > 0.
     pub(crate) fn non_empty_indices(&self) -> Vec<usize> {
-        (0..Histogram::<T, WIDTH>::total_buckets())
+        let Some(first) = self.series.first() else {
+            return Vec::new();
+        };
+        (0..first.histogram.num_buckets())
             .filter(|&i| self.series.iter().any(|s| s.histogram.bucket(i).count() > 0))
             .collect()
     }
@@ -136,7 +139,7 @@ impl<T, const WIDTH: usize> AsciiChart<T, WIDTH> {
     }
 }
 
-impl<T, const WIDTH: usize> fmt::Display for AsciiChart<T, WIDTH> {
+impl<T> fmt::Display for AsciiChart<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.detailed().fmt(f)
     }

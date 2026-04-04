@@ -5,12 +5,12 @@ use super::histogram::Histogram;
 /// Provides derived calculations such as density slopes and trapezoidal
 /// interpolation, without modifying the underlying histogram.
 #[derive(Clone, Copy)]
-pub struct Density<'a, T = (), const WIDTH: usize = 3> {
-    pub(super) hist: &'a Histogram<T, WIDTH>,
+pub struct Density<'a, T = ()> {
+    pub(super) hist: &'a Histogram<T>,
 }
 
-impl<'a, T, const WIDTH: usize> Density<'a, T, WIDTH> {
-    pub fn new(hist: &'a Histogram<T, WIDTH>) -> Self {
+impl<'a, T> Density<'a, T> {
+    pub fn new(hist: &'a Histogram<T>) -> Self {
         Self { hist }
     }
 
@@ -76,10 +76,20 @@ impl<'a, T, const WIDTH: usize> Density<'a, T, WIDTH> {
         let x = x as f64;
 
         let d1 = b.count() as f64 / w;
-        let k = self.density_slope(bucket);
+        let mut k = self.density_slope(bucket);
+
+        if d1 + k * w / 2.0 < 0.0 {
+            // Density at right edge would be negative → adjust slope
+            k = -d1 / (w / 2.0);
+        }
+        if d1 - k * w / 2.0 < 0.0 {
+            k = d1 / (w / 2.0); // Adjust slope to maintain average density
+        }
 
         // d(x) = a + k·x, where a = d1 - k·w/2 is density at left edge
         let a = d1 - k * w / 2.0;
+        let b = d1 + k * w / 2.0; // Density at right edge, for debugging
+        println!("bucket {bucket}: width={w} d1={d1}, k={k}, a={a} b={b}");
         a * x + k * x * x / 2.0
     }
 

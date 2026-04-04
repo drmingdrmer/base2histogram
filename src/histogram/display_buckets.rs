@@ -3,17 +3,17 @@ use std::fmt;
 use crate::Histogram;
 
 /// Displays non-empty buckets of a histogram, one per line.
-pub struct DisplayBuckets<'a, T, const WIDTH: usize> {
-    histogram: &'a Histogram<T, WIDTH>,
+pub struct DisplayBuckets<'a, T> {
+    histogram: &'a Histogram<T>,
 }
 
-impl<'a, T, const WIDTH: usize> DisplayBuckets<'a, T, WIDTH> {
-    pub(crate) fn new(histogram: &'a Histogram<T, WIDTH>) -> Self {
+impl<'a, T> DisplayBuckets<'a, T> {
+    pub(crate) fn new(histogram: &'a Histogram<T>) -> Self {
         Self { histogram }
     }
 }
 
-impl<T, const WIDTH: usize> fmt::Display for DisplayBuckets<'_, T, WIDTH> {
+impl<T> fmt::Display for DisplayBuckets<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
         for b in self.histogram.bucket_data() {
@@ -44,7 +44,7 @@ mod tests {
     fn test_display_single_bucket() {
         let mut hist: Histogram = Histogram::new();
         hist.record_n(10, 5);
-        assert_eq!(hist.display_buckets().to_string(), "[0xa,0xc)=5");
+        assert_eq!(hist.display_buckets().to_string(), "b9[10,12)=5");
     }
 
     #[test]
@@ -52,7 +52,7 @@ mod tests {
         let mut hist: Histogram = Histogram::new();
         hist.record_n(5, 10);
         hist.record_n(100, 20);
-        assert_eq!(hist.display_buckets().to_string(), "[0x5,0x6)=10\n[0x60,0x70)=20");
+        assert_eq!(hist.display_buckets().to_string(), "b5[5,6)=10\nb22[96,112)=20");
     }
 
     #[test]
@@ -60,6 +60,6 @@ mod tests {
         let mut hist: Histogram = Histogram::new();
         hist.record_n(0, 3);
         hist.record_n(1000, 7);
-        assert_eq!(hist.display_buckets().to_string(), "[0x0,0x1)=3\n[0x380,0x400)=7");
+        assert_eq!(hist.display_buckets().to_string(), "b0[0,1)=3\nb35[896,1024)=7");
     }
 }

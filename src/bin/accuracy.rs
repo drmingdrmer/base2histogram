@@ -1,9 +1,7 @@
 use std::f64::consts::PI;
-use std::sync::LazyLock;
 
 use base2histogram::Histogram;
 use base2histogram::LogScale;
-use base2histogram::LogScaleConfig;
 
 /// Simple xorshift64 PRNG (no external dependency needed).
 struct Rng(u64);
@@ -64,8 +62,8 @@ struct Distribution {
 
 /// Evaluate percentile accuracy for one distribution.
 /// Returns the absolute relative error (%) for each percentile point.
-fn evaluate<const WIDTH: usize>(dist: &Distribution, log_scale: &'static LogScale<WIDTH>) -> Vec<f64> {
-    let mut hist = Histogram::<(), WIDTH>::with_log_scale(log_scale, 1);
+fn evaluate(dist: &Distribution, width: usize) -> Vec<f64> {
+    let mut hist = Histogram::<()>::with_log_scale(width, 1);
     for &v in &dist.values {
         hist.record(v);
     }
@@ -99,8 +97,8 @@ fn evaluate<const WIDTH: usize>(dist: &Distribution, log_scale: &'static LogScal
 }
 
 /// Evaluate without printing — for `--summary` mode.
-fn evaluate_silent<const WIDTH: usize>(dist: &Distribution, log_scale: &'static LogScale<WIDTH>) -> Vec<f64> {
-    let mut hist = Histogram::<(), WIDTH>::with_log_scale(log_scale, 1);
+fn evaluate_silent(dist: &Distribution, width: usize) -> Vec<f64> {
+    let mut hist = Histogram::<()>::with_log_scale(width, 1);
     for &v in &dist.values {
         hist.record(v);
     }
@@ -186,13 +184,6 @@ fn generate_distributions(n: usize) -> Vec<Distribution> {
     dists
 }
 
-static SCALE_1: LazyLock<LogScale<1>> = LazyLock::new(LogScale::new);
-static SCALE_2: LazyLock<LogScale<2>> = LazyLock::new(LogScale::new);
-static SCALE_3: LazyLock<LogScale<3>> = LazyLock::new(LogScale::new);
-static SCALE_4: LazyLock<LogScale<4>> = LazyLock::new(LogScale::new);
-static SCALE_5: LazyLock<LogScale<5>> = LazyLock::new(LogScale::new);
-static SCALE_6: LazyLock<LogScale<6>> = LazyLock::new(LogScale::new);
-
 /// Summary statistics for one WIDTH across all distributions.
 struct WidthResult {
     width: usize,
@@ -202,54 +193,36 @@ struct WidthResult {
     errors: Vec<Vec<f64>>,
 }
 
-macro_rules! run_width_silent {
-    ($width:expr, $scale:expr, $distributions:expr, $results:expr) => {{
-        let log_scale: &'static LogScale<{ $width }> = &$scale;
-        let buckets = LogScaleConfig::<{ $width }>::BUCKETS;
-        let memory_bytes = 2 * buckets * size_of::<u64>();
+fn run_width_silent(width: usize, distributions: &[Distribution], results: &mut Vec<WidthResult>) {
+    let buckets = LogScale::get(width).num_buckets();
+    let memory_bytes = 2 * buckets * size_of::<u64>();
 
-        let mut errors: Vec<Vec<f64>> = Vec::new();
-        for dist in $distributions.iter() {
-            errors.push(evaluate_silent(dist, log_scale));
-        }
+    let errors: Vec<Vec<f64>> = distributions.iter().map(|dist| evaluate_silent(dist, width)).collect();
 
-        $results.push(WidthResult {
-            width: $width,
-            buckets,
-            memory_bytes,
-            errors,
-        });
-    }};
+    results.push(WidthResult {
+        width,
+        buckets,
+        memory_bytes,
+        errors,
+    });
 }
 
-macro_rules! run_width {
-    ($width:expr, $scale:expr, $distributions:expr, $results:expr) => {{
-        let log_scale: &'static LogScale<{ $width }> = &$scale;
-        let buckets = LogScaleConfig::<{ $width }>::BUCKETS;
-        // 1-slot histogram: aggregate_buckets + 1 slot's buckets = 2 * buckets * 8
-        let memory_bytes = 2 * buckets * size_of::<u64>();
+fn run_width_verbose(width: usize, distributions: &[Distribution], results: &mut Vec<WidthResult>) {
+    let buckets = LogScale::get(width).num_buckets();
+    let memory_bytes = 2 * buckets * size_of::<u64>();
 
-        println!("\n{}", "=".repeat(60));
-        println!(
-            "WIDTH={}  ({} buckets, {})",
-            $width,
-            buckets,
-            format_bytes(memory_bytes),
-        );
-        println!("{}", "=".repeat(60));
+    println!("\n{}", "=".repeat(60));
+    println!("WIDTH={}  ({} buckets, {})", width, buckets, format_bytes(memory_bytes),);
+    println!("{}", "=".repeat(60));
 
-        let mut errors: Vec<Vec<f64>> = Vec::new();
-        for dist in $distributions.iter() {
-            errors.push(evaluate(dist, log_scale));
-        }
+    let errors: Vec<Vec<f64>> = distributions.iter().map(|dist| evaluate(dist, width)).collect();
 
-        $results.push(WidthResult {
-            width: $width,
-            buckets,
-            memory_bytes,
-            errors,
-        });
-    }};
+    results.push(WidthResult {
+        width,
+        buckets,
+        memory_bytes,
+        errors,
+    });
 }
 
 fn main() {
@@ -267,20 +240,12 @@ fn main() {
 
     let mut results: Vec<WidthResult> = Vec::new();
 
-    if summary_only {
-        run_width_silent!(1, SCALE_1, &distributions, &mut results);
-        run_width_silent!(2, SCALE_2, &distributions, &mut results);
-        run_width_silent!(3, SCALE_3, &distributions, &mut results);
-        run_width_silent!(4, SCALE_4, &distributions, &mut results);
-        run_width_silent!(5, SCALE_5, &distributions, &mut results);
-        run_width_silent!(6, SCALE_6, &distributions, &mut results);
-    } else {
-        run_width!(1, SCALE_1, &distributions, &mut results);
-        run_width!(2, SCALE_2, &distributions, &mut results);
-        run_width!(3, SCALE_3, &distributions, &mut results);
-        run_width!(4, SCALE_4, &distributions, &mut results);
-        run_width!(5, SCALE_5, &distributions, &mut results);
-        run_width!(6, SCALE_6, &distributions, &mut results);
+    for width in 1..=6 {
+        if summary_only {
+            run_width_silent(width, &distributions, &mut results);
+        } else {
+            run_width_verbose(width, &distributions, &mut results);
+        }
     }
 
     // --- Summary chart ---

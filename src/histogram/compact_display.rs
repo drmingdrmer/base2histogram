@@ -7,17 +7,17 @@ use super::ascii_chart::digit_count;
 /// Compact ASCII chart display, suitable for log files.
 ///
 /// Created by [`AsciiChart::compact`]. Renders lazily via [`fmt::Display`].
-pub struct CompactDisplay<'a, T, const WIDTH: usize> {
-    chart: &'a AsciiChart<T, WIDTH>,
+pub struct CompactDisplay<'a, T> {
+    chart: &'a AsciiChart<T>,
 }
 
-impl<'a, T, const WIDTH: usize> CompactDisplay<'a, T, WIDTH> {
-    pub(crate) fn new(chart: &'a AsciiChart<T, WIDTH>) -> Self {
+impl<'a, T> CompactDisplay<'a, T> {
+    pub(crate) fn new(chart: &'a AsciiChart<T>) -> Self {
         Self { chart }
     }
 }
 
-impl<T, const WIDTH: usize> fmt::Display for CompactDisplay<'_, T, WIDTH> {
+impl<T> fmt::Display for CompactDisplay<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indices = self.chart.non_empty_indices();
         if indices.is_empty() {

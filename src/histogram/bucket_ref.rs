@@ -8,20 +8,27 @@ use super::log_scale::LogScale;
 /// Holds a reference to the log scale and the bucket index.
 /// Left/right boundary values are computed only when the corresponding method is called.
 #[derive(Debug, Clone, Copy)]
-pub struct BucketRef<'a, const WIDTH: usize> {
-    log_scale: &'a LogScale<WIDTH>,
+pub struct BucketRef<'a> {
+    log_scale: &'a LogScale,
     index: usize,
     count: u64,
 }
 
-impl<const WIDTH: usize> fmt::Display for BucketRef<'_, WIDTH> {
+impl fmt::Display for BucketRef<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "[{:#x},{:#x})={}", self.left(), self.right(), self.count())
+        write!(
+            f,
+            "b{}[{},{})={}",
+            self.index(),
+            self.left(),
+            self.right(),
+            self.count()
+        )
     }
 }
 
-impl<'a, const WIDTH: usize> BucketRef<'a, WIDTH> {
-    pub(crate) fn new(log_scale: &'a LogScale<WIDTH>, index: usize, count: u64) -> Self {
+impl<'a> BucketRef<'a> {
+    pub(crate) fn new(log_scale: &'a LogScale, index: usize, count: u64) -> Self {
         Self {
             log_scale,
             index,
@@ -145,8 +152,8 @@ mod tests {
 
         let buckets: Vec<_> = hist.bucket_data().filter(|b| b.count() > 0).collect();
 
-        assert_eq!(buckets[0].to_string(), "[0x5,0x6)=10");
-        assert_eq!(buckets[1].to_string(), "[0x60,0x70)=3");
+        assert_eq!(buckets[0].to_string(), "b5[5,6)=10");
+        assert_eq!(buckets[1].to_string(), "b22[96,112)=3");
     }
 
     /// Values at exact/log group boundaries: 3→4, 7→8

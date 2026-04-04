@@ -9,8 +9,8 @@ use super::histogram::Histogram;
 /// call left off, rather than re-scanning from bucket 0.
 ///
 /// Each `position` passed to `count_below` must be >= the previous one.
-pub struct CumulativeCount<'a, T = (), const WIDTH: usize = 3> {
-    density: Density<'a, T, WIDTH>,
+pub struct CumulativeCount<'a, T = ()> {
+    density: Density<'a, T>,
 
     /// Index of the bucket containing or following the last queried position.
     bucket_index: usize,
@@ -19,13 +19,21 @@ pub struct CumulativeCount<'a, T = (), const WIDTH: usize = 3> {
     accumulated: u64,
 }
 
-impl<'a, T, const WIDTH: usize> CumulativeCount<'a, T, WIDTH> {
-    pub fn new(hist: &'a Histogram<T, WIDTH>) -> Self {
+impl<'a, T> CumulativeCount<'a, T> {
+    pub fn new(hist: &'a Histogram<T>) -> Self {
         Self {
             density: Density::new(hist),
             bucket_index: 0,
             accumulated: 0,
         }
+    }
+
+    pub fn current_bucket(&self) -> usize {
+        self.bucket_index
+    }
+
+    pub fn whole_bucket_accumulated(&self) -> u64 {
+        self.accumulated
     }
 
     /// Returns the estimated count of samples in `[0, position)`.

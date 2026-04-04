@@ -9,53 +9,69 @@ use super::log_scale_config::LogScaleConfig;
 /// - Value → bucket index (with small-value cache)
 /// - Bucket index → left boundary value
 ///
-/// Use the shared [`LOG_SCALE`] instance for WIDTH=3 (default configuration).
+/// Use [`LogScale::get`] to obtain a shared instance for a given width.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LogScale<const WIDTH: usize> {
+pub struct LogScale {
+    config: LogScaleConfig,
     /// Left boundary value for each bucket index.
     pub(crate) bucket_min_values: Vec<u64>,
     /// Cached bucket indices for small values (0-4095).
     small_value_buckets: Vec<u8>,
 }
 
-impl<const WIDTH: usize> LogScale<WIDTH> {
-    /// Creates a new LogScale for the given WIDTH configuration.
-    pub fn new() -> Self {
-        // Build bucket_min_values table
-        let bucket_min_values: Vec<u64> =
-            (0..LogScaleConfig::<WIDTH>::BUCKETS).map(Self::compute_bucket_min_value).collect();
+const MAX_WIDTH: usize = 16;
+
+static LOG_SCALES: LazyLock<Vec<LogScale>> = LazyLock::new(|| (1..=MAX_WIDTH).map(LogScale::new).collect());
+
+impl LogScale {
+    pub const DEFAULT_WIDTH: usize = 3;
+
+    /// Returns a shared `LogScale` instance for the given width (1..=16).
+    pub fn get(width: usize) -> &'static LogScale {
+        assert!(
+            (1..=MAX_WIDTH).contains(&width),
+            "width must be 1..={MAX_WIDTH}, got {width}"
+        );
+        &LOG_SCALES[width - 1]
+    }
+
+    /// Creates a new LogScale for the given width configuration.
+    pub fn new(width: usize) -> Self {
+        let mut s = Self {
+            config: LogScaleConfig::new(width),
+            bucket_min_values: Vec::new(),
+            small_value_buckets: Vec::new(),
+        };
+
+        s.bucket_min_values = (0..s.config.buckets()).map(|i| s.compute_bucket_min_value(i)).collect();
 
         // Build small_value_buckets cache.
         // Stop when the bucket index no longer fits in u8 to avoid truncation.
-        let mut small_value_buckets = Vec::with_capacity(LogScaleConfig::<WIDTH>::SMALL_VALUE_CACHE_SIZE);
-        for v in 0..LogScaleConfig::<WIDTH>::SMALL_VALUE_CACHE_SIZE {
-            let bucket = Self::calculate_bucket_uncached(v as u64);
+        s.small_value_buckets = Vec::with_capacity(s.config.small_value_cache_size());
+        for v in 0..s.config.small_value_cache_size() {
+            let bucket = s.calculate_bucket_uncached(v as u64);
             let Ok(bucket) = u8::try_from(bucket) else {
                 break;
             };
-            small_value_buckets.push(bucket);
+            s.small_value_buckets.push(bucket);
         }
 
-        Self {
-            bucket_min_values,
-            small_value_buckets,
-        }
+        s
     }
 
-    /// Returns the number of buckets for this `WIDTH` (compile-time constant).
-    #[inline]
-    pub const fn total_buckets() -> usize {
-        LogScaleConfig::<WIDTH>::BUCKETS
+    /// Returns the configuration for this log scale.
+    pub fn config(&self) -> &LogScaleConfig {
+        &self.config
     }
 
     /// Returns the number of buckets.
     #[inline]
-    pub const fn num_buckets(&self) -> usize {
-        Self::total_buckets()
+    pub fn num_buckets(&self) -> usize {
+        self.config.buckets()
     }
 
     /// Returns a reference to the bucket geometry at the given index.
-    pub fn bucket_span(&self, index: usize) -> BucketSpan<'_, WIDTH> {
+    pub fn bucket_span(&self, index: usize) -> BucketSpan<'_> {
         BucketSpan::new(self, index)
     }
 
@@ -191,7 +207,7 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
         if value < self.small_value_buckets.len() as u64 {
             return self.small_value_buckets[value as usize] as usize;
         }
-        Self::calculate_bucket_uncached(value)
+        self.calculate_bucket_uncached(value)
     }
 
     /// Calculates the bucket index for a given value using logarithmic bucketing.
@@ -203,8 +219,8 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
     ///    - Determine which group of GROUP_SIZE buckets
     ///    - Extract offset within that group using the bits after MSB
     ///    - Bucket index = base of this group + offset within group
-    pub fn calculate_bucket_uncached(value: u64) -> usize {
-        let g_size = LogScaleConfig::<WIDTH>::GROUP_SIZE;
+    pub fn calculate_bucket_uncached(&self, value: u64) -> usize {
+        let g_size = self.config.group_size();
 
         if value < g_size as u64 {
             return value as usize;
@@ -217,164 +233,155 @@ impl<const WIDTH: usize> LogScale<WIDTH> {
         //
         // xxxx: offset_in_group
         let bits_upto_msb = (u64::BITS - value.leading_zeros()) as usize;
-        let group_index = bits_upto_msb - LogScaleConfig::<WIDTH>::WIDTH;
-        let offset_in_group = ((value >> group_index) & LogScaleConfig::<WIDTH>::MASK) as usize;
+        let group_index = bits_upto_msb - self.config.width();
+        let offset_in_group = ((value >> group_index) & self.config.mask()) as usize;
 
         g_size + group_index * g_size + offset_in_group
     }
 
     /// Computes the left boundary value for a bucket index.
-    fn compute_bucket_min_value(bucket: usize) -> u64 {
-        let g_size = LogScaleConfig::<WIDTH>::GROUP_SIZE;
+    fn compute_bucket_min_value(&self, bucket: usize) -> u64 {
+        let g_size = self.config.group_size();
 
         if bucket < g_size {
             return bucket as u64;
         }
         let group_index = (bucket - g_size) / g_size;
         let offset_in_group = (bucket - g_size) % g_size;
-        ((offset_in_group | LogScaleConfig::<WIDTH>::GROUP_MSB_BIT) << group_index) as u64
+        ((offset_in_group | g_size) << group_index) as u64
     }
 }
 
-impl<const WIDTH: usize> Default for LogScale<WIDTH> {
+impl Default for LogScale {
     fn default() -> Self {
-        Self::new()
+        Self::new(Self::DEFAULT_WIDTH)
     }
 }
-
-/// Default log scale with WIDTH=3 (252 buckets, ~12.5% max error).
-pub type LogScale3 = LogScale<3>;
-
-/// Shared LogScale instance for WIDTH=3 (default configuration).
-pub static LOG_SCALE: LazyLock<LogScale3> = LazyLock::new(LogScale3::new);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_total_buckets_is_const() {
-        // total_buckets() is const fn without &self, usable for array sizing at compile time.
-        let buckets: [u64; LogScale3::total_buckets()] = [0; LogScale3::total_buckets()];
-        assert_eq!(buckets.len(), 252);
-        assert_eq!(LOG_SCALE.num_buckets(), 252);
+    fn test_num_buckets() {
+        assert_eq!(LogScale::get(3).num_buckets(), 252);
     }
 
     #[test]
     fn test_calculate_bucket_group_0() {
-        assert_eq!(LogScale3::calculate_bucket_uncached(0), 0);
-        assert_eq!(LogScale3::calculate_bucket_uncached(1), 1);
-        assert_eq!(LogScale3::calculate_bucket_uncached(2), 2);
-        assert_eq!(LogScale3::calculate_bucket_uncached(3), 3);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(0), 0);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(1), 1);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(2), 2);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(3), 3);
     }
 
     #[test]
     fn test_calculate_bucket_group_1() {
-        assert_eq!(LogScale3::calculate_bucket_uncached(4), 4);
-        assert_eq!(LogScale3::calculate_bucket_uncached(5), 5);
-        assert_eq!(LogScale3::calculate_bucket_uncached(6), 6);
-        assert_eq!(LogScale3::calculate_bucket_uncached(7), 7);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(4), 4);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(5), 5);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(6), 6);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(7), 7);
     }
 
     #[test]
     fn test_calculate_bucket_group_2() {
-        assert_eq!(LogScale3::calculate_bucket_uncached(8), 8);
-        assert_eq!(LogScale3::calculate_bucket_uncached(10), 9);
-        assert_eq!(LogScale3::calculate_bucket_uncached(12), 10);
-        assert_eq!(LogScale3::calculate_bucket_uncached(14), 11);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(8), 8);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(10), 9);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(12), 10);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(14), 11);
     }
 
     #[test]
     fn test_calculate_bucket_group_3() {
-        assert_eq!(LogScale3::calculate_bucket_uncached(16), 12);
-        assert_eq!(LogScale3::calculate_bucket_uncached(20), 13);
-        assert_eq!(LogScale3::calculate_bucket_uncached(24), 14);
-        assert_eq!(LogScale3::calculate_bucket_uncached(28), 15);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(16), 12);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(20), 13);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(24), 14);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(28), 15);
     }
 
     #[test]
     fn test_calculate_bucket_group_4() {
-        assert_eq!(LogScale3::calculate_bucket_uncached(32), 16);
-        assert_eq!(LogScale3::calculate_bucket_uncached(40), 17);
-        assert_eq!(LogScale3::calculate_bucket_uncached(48), 18);
-        assert_eq!(LogScale3::calculate_bucket_uncached(56), 19);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(32), 16);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(40), 17);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(48), 18);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(56), 19);
     }
 
     #[test]
     fn test_reasonable_bucket_ranges() {
-        assert_eq!(LogScale3::calculate_bucket_uncached(1024), 36);
-        assert_eq!(LogScale3::calculate_bucket_uncached(2048), 40);
-        assert_eq!(LogScale3::calculate_bucket_uncached(4096), 44);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(1024), 36);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(2048), 40);
+        assert_eq!(LogScale::get(3).calculate_bucket_uncached(4096), 44);
 
         let million = 1_048_576;
-        let million_bucket = LogScale3::calculate_bucket_uncached(million);
+        let million_bucket = LogScale::get(3).calculate_bucket_uncached(million);
         assert!(million_bucket < 80);
 
         let billion = 1_073_741_824;
-        let billion_bucket = LogScale3::calculate_bucket_uncached(billion);
+        let billion_bucket = LogScale::get(3).calculate_bucket_uncached(billion);
         assert!(billion_bucket < 120);
     }
 
     #[test]
     fn test_bucket_min_values_lookup_table() {
         // Group 0: [0, 1, 2, 3]
-        assert_eq!(LOG_SCALE.bucket_left(0), 0);
-        assert_eq!(LOG_SCALE.bucket_left(1), 1);
-        assert_eq!(LOG_SCALE.bucket_left(2), 2);
-        assert_eq!(LOG_SCALE.bucket_left(3), 3);
+        assert_eq!(LogScale::get(3).bucket_left(0), 0);
+        assert_eq!(LogScale::get(3).bucket_left(1), 1);
+        assert_eq!(LogScale::get(3).bucket_left(2), 2);
+        assert_eq!(LogScale::get(3).bucket_left(3), 3);
 
         // Group 1: [4, 5, 6, 7]
-        assert_eq!(LOG_SCALE.bucket_left(4), 4);
-        assert_eq!(LOG_SCALE.bucket_left(5), 5);
-        assert_eq!(LOG_SCALE.bucket_left(6), 6);
-        assert_eq!(LOG_SCALE.bucket_left(7), 7);
+        assert_eq!(LogScale::get(3).bucket_left(4), 4);
+        assert_eq!(LogScale::get(3).bucket_left(5), 5);
+        assert_eq!(LogScale::get(3).bucket_left(6), 6);
+        assert_eq!(LogScale::get(3).bucket_left(7), 7);
 
         // Group 2: [8, 10, 12, 14]
-        assert_eq!(LOG_SCALE.bucket_left(8), 8);
-        assert_eq!(LOG_SCALE.bucket_left(9), 10);
-        assert_eq!(LOG_SCALE.bucket_left(10), 12);
-        assert_eq!(LOG_SCALE.bucket_left(11), 14);
+        assert_eq!(LogScale::get(3).bucket_left(8), 8);
+        assert_eq!(LogScale::get(3).bucket_left(9), 10);
+        assert_eq!(LogScale::get(3).bucket_left(10), 12);
+        assert_eq!(LogScale::get(3).bucket_left(11), 14);
 
         // Group 3: [16, 20, 24, 28]
-        assert_eq!(LOG_SCALE.bucket_left(12), 16);
-        assert_eq!(LOG_SCALE.bucket_left(13), 20);
-        assert_eq!(LOG_SCALE.bucket_left(14), 24);
-        assert_eq!(LOG_SCALE.bucket_left(15), 28);
+        assert_eq!(LogScale::get(3).bucket_left(12), 16);
+        assert_eq!(LogScale::get(3).bucket_left(13), 20);
+        assert_eq!(LogScale::get(3).bucket_left(14), 24);
+        assert_eq!(LogScale::get(3).bucket_left(15), 28);
     }
 
     #[test]
     fn test_bucket_width() {
         // Group 0: single-value buckets, width=1
-        assert_eq!(LOG_SCALE.bucket_width(0), 1); // [0,1)
-        assert_eq!(LOG_SCALE.bucket_width(1), 1); // [1,2)
-        assert_eq!(LOG_SCALE.bucket_width(3), 1); // [3,4)
+        assert_eq!(LogScale::get(3).bucket_width(0), 1); // [0,1)
+        assert_eq!(LogScale::get(3).bucket_width(1), 1); // [1,2)
+        assert_eq!(LogScale::get(3).bucket_width(3), 1); // [3,4)
 
         // Group 1: still width=1
-        assert_eq!(LOG_SCALE.bucket_width(4), 1); // [4,5)
-        assert_eq!(LOG_SCALE.bucket_width(7), 1); // [7,8)
+        assert_eq!(LogScale::get(3).bucket_width(4), 1); // [4,5)
+        assert_eq!(LogScale::get(3).bucket_width(7), 1); // [7,8)
 
         // Group 2: width=2
-        assert_eq!(LOG_SCALE.bucket_width(8), 2); // [8,10)
-        assert_eq!(LOG_SCALE.bucket_width(11), 2); // [14,16)
+        assert_eq!(LogScale::get(3).bucket_width(8), 2); // [8,10)
+        assert_eq!(LogScale::get(3).bucket_width(11), 2); // [14,16)
 
         // Group 3: width=4
-        assert_eq!(LOG_SCALE.bucket_width(12), 4); // [16,20)
-        assert_eq!(LOG_SCALE.bucket_width(15), 4); // [28,32)
+        assert_eq!(LogScale::get(3).bucket_width(12), 4); // [16,20)
+        assert_eq!(LogScale::get(3).bucket_width(15), 4); // [28,32)
 
         // Group 4: width=8
-        assert_eq!(LOG_SCALE.bucket_width(16), 8); // [32,40)
+        assert_eq!(LogScale::get(3).bucket_width(16), 8); // [32,40)
 
         // Last bucket (251): right=u64::MAX, left=0b111<<61
-        assert_eq!(LOG_SCALE.bucket_width(251), u64::MAX - (0b111 << 61));
+        assert_eq!(LogScale::get(3).bucket_width(251), u64::MAX - (0b111 << 61));
 
         // Second-to-last bucket (250): step=2^61
-        assert_eq!(LOG_SCALE.bucket_width(250), 1 << 61);
+        assert_eq!(LogScale::get(3).bucket_width(250), 1 << 61);
     }
 
     #[test]
     fn test_bucket_span() {
         // Group 0: [0,1)
-        let b = LOG_SCALE.bucket_span(0);
+        let b = LogScale::get(3).bucket_span(0);
         assert_eq!(b.index(), 0);
         assert_eq!(b.left(), 0);
         assert_eq!(b.right(), 1);
@@ -382,7 +389,7 @@ mod tests {
         assert_eq!(b.midpoint(), 0);
 
         // Group 2: [8,10)
-        let b = LOG_SCALE.bucket_span(8);
+        let b = LogScale::get(3).bucket_span(8);
         assert_eq!(b.index(), 8);
         assert_eq!(b.left(), 8);
         assert_eq!(b.right(), 10);
@@ -390,7 +397,7 @@ mod tests {
         assert_eq!(b.midpoint(), 9);
 
         // Group 3: [16,20)
-        let b = LOG_SCALE.bucket_span(12);
+        let b = LogScale::get(3).bucket_span(12);
         assert_eq!(b.index(), 12);
         assert_eq!(b.left(), 16);
         assert_eq!(b.right(), 20);
@@ -398,7 +405,7 @@ mod tests {
         assert_eq!(b.midpoint(), 18);
 
         // Last bucket (251)
-        let b = LOG_SCALE.bucket_span(251);
+        let b = LogScale::get(3).bucket_span(251);
         assert_eq!(b.left(), 0b111 << 61);
         assert_eq!(b.right(), u64::MAX);
         assert_eq!(b.width(), u64::MAX - (0b111 << 61));
@@ -411,8 +418,8 @@ mod tests {
             (0..100).chain((100..1000).step_by(10)).chain((1000..4096).step_by(100)).collect();
 
         for v in test_values {
-            let cached = LOG_SCALE.calculate_bucket(v as u64);
-            let uncached = LogScale3::calculate_bucket_uncached(v as u64);
+            let cached = LogScale::get(3).calculate_bucket(v as u64);
+            let uncached = LogScale::get(3).calculate_bucket_uncached(v as u64);
             assert_eq!(cached, uncached, "Mismatch at value {v}");
         }
     }
@@ -420,16 +427,16 @@ mod tests {
     #[test]
     fn test_cached_bucket_boundary() {
         // Test at cache boundary
-        let last_cached = (LogScaleConfig::<3>::SMALL_VALUE_CACHE_SIZE - 1) as u64;
-        let first_uncached = LogScaleConfig::<3>::SMALL_VALUE_CACHE_SIZE as u64;
+        let last_cached = (LogScale::get(3).config().small_value_cache_size() - 1) as u64;
+        let first_uncached = LogScale::get(3).config().small_value_cache_size() as u64;
 
         assert_eq!(
-            LOG_SCALE.calculate_bucket(last_cached),
-            LogScale3::calculate_bucket_uncached(last_cached)
+            LogScale::get(3).calculate_bucket(last_cached),
+            LogScale::get(3).calculate_bucket_uncached(last_cached)
         );
         assert_eq!(
-            LOG_SCALE.calculate_bucket(first_uncached),
-            LogScale3::calculate_bucket_uncached(first_uncached)
+            LogScale::get(3).calculate_bucket(first_uncached),
+            LogScale::get(3).calculate_bucket_uncached(first_uncached)
         );
     }
 
@@ -439,8 +446,8 @@ mod tests {
         let large_values = [4096, 10000, 100000, 1_000_000, u64::MAX];
         for &v in &large_values {
             assert_eq!(
-                LOG_SCALE.calculate_bucket(v),
-                LogScale3::calculate_bucket_uncached(v),
+                LogScale::get(3).calculate_bucket(v),
+                LogScale::get(3).calculate_bucket_uncached(v),
                 "Mismatch at value {v}"
             );
         }
@@ -455,15 +462,15 @@ mod tests {
         //
         // Equal widths, so density = count / 2, midpoints = 9, 11, 13
         // c0=10, c2=30 → d0=5, d2=15 → k = (15-5)/(13-9) = 2.5
-        let k = LOG_SCALE.density_slope(9, 10, 30);
+        let k = LogScale::get(3).density_slope(9, 10, 30);
         assert!((k - 2.5).abs() < 1e-10, "k = {k}");
 
         // Decreasing: c0=30, c2=10 → d0=15, d2=5 → k = -2.5
-        let k = LOG_SCALE.density_slope(9, 30, 10);
+        let k = LogScale::get(3).density_slope(9, 30, 10);
         assert!((k - (-2.5)).abs() < 1e-10, "k = {k}");
 
         // Equal neighbor counts → k = 0
-        let k = LOG_SCALE.density_slope(9, 20, 20);
+        let k = LogScale::get(3).density_slope(9, 20, 20);
         assert!(k.abs() < 1e-10, "k = {k}");
 
         // Unequal widths:
@@ -472,27 +479,27 @@ mod tests {
         //   bucket 13: [20,24) width=4
         //
         // c0=4, c2=8 → d0=4/2=2, d2=8/4=2 → equal density → k=0
-        let k = LOG_SCALE.density_slope(12, 4, 8);
+        let k = LogScale::get(3).density_slope(12, 4, 8);
         assert!(k.abs() < 1e-10, "k = {k}");
 
         // c0=2, c2=8 → d0=2/2=1, d2=8/4=2
         // m0=(14+16)/2=15, m2=(20+24)/2=22 → k=(2-1)/(22-15)=1/7
-        let k = LOG_SCALE.density_slope(12, 2, 8);
+        let k = LogScale::get(3).density_slope(12, 2, 8);
         assert!((k - 1.0 / 7.0).abs() < 1e-10, "k = {k}");
     }
 
     #[test]
     fn test_new_reduces_small_value_cache_when_bucket_exceeds_u8() {
-        let log_scale = LogScale::<7>::new();
+        let log_scale = LogScale::new(7);
 
         assert_eq!(log_scale.small_value_buckets.len(), 512);
         assert_eq!(
             log_scale.calculate_bucket(511),
-            LogScale::<7>::calculate_bucket_uncached(511)
+            log_scale.calculate_bucket_uncached(511)
         );
         assert_eq!(
             log_scale.calculate_bucket(512),
-            LogScale::<7>::calculate_bucket_uncached(512)
+            log_scale.calculate_bucket_uncached(512)
         );
     }
 }

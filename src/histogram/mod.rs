@@ -21,13 +21,7 @@ pub use cumulative_count::CumulativeCount;
 pub use density::Density;
 pub use histogram::Histogram;
 #[allow(unused_imports)]
-pub use log_scale::LOG_SCALE;
-#[allow(unused_imports)]
 pub use log_scale::LogScale;
-#[allow(unused_imports)]
-pub use log_scale::LogScale3;
-#[allow(unused_imports)]
-pub use log_scale_config::DefaultLogScaleConfig;
 #[allow(unused_imports)]
 pub use log_scale_config::LogScaleConfig;
 pub use percentile_stats::PercentileStats;

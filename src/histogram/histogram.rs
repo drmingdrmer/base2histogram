@@ -1,7 +1,6 @@
 use super::bucket_ref::BucketRef;
 use super::cumulative_count::CumulativeCount;
 use super::density::Density;
-use super::log_scale::LOG_SCALE;
 use super::log_scale::LogScale;
 use super::percentile_stats::PercentileStats;
 use super::slot::Slot;
@@ -64,9 +63,9 @@ use crate::histogram::display_buckets::DisplayBuckets;
 /// Fixed at 252 buckets * 8 bytes = 2,016 bytes per slot, covering the entire
 /// u64 range [0, 2^64-1].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Histogram<T = (), const WIDTH: usize = 3> {
+pub struct Histogram<T = ()> {
     /// Log scale for value-to-bucket mapping.
-    log_scale: &'static LogScale<WIDTH>,
+    log_scale: &'static LogScale,
 
     /// Slots containing bucket counts and metadata.
     /// All slots in the deque are active. First slot (index 0) is oldest, last is current.
@@ -97,16 +96,15 @@ impl<T> Histogram<T> {
     /// When `slot_limit` is 0 or 1, no individual slots are maintained —
     /// the aggregate buckets are the sole source of truth.
     pub fn with_slots(slot_limit: usize) -> Self {
-        Self::with_log_scale(&LOG_SCALE, slot_limit)
+        Self::with_log_scale(LogScale::DEFAULT_WIDTH, slot_limit)
     }
-}
 
-impl<T, const WIDTH: usize> Histogram<T, WIDTH> {
-    /// Creates a new histogram with custom log scale and slot limit.
+    /// Creates a new histogram with the specified bucket width and slot limit.
     ///
     /// When `slot_limit` is 0 or 1, no individual slots are maintained —
     /// the aggregate buckets are the sole source of truth.
-    pub fn with_log_scale(log_scale: &'static LogScale<WIDTH>, slot_limit: usize) -> Self {
+    pub fn with_log_scale(width: usize, slot_limit: usize) -> Self {
+        let log_scale = LogScale::get(width);
         let num_buckets = log_scale.num_buckets();
 
         Self {
@@ -270,7 +268,7 @@ impl<T, const WIDTH: usize> Histogram<T, WIDTH> {
     ///
     /// Includes all buckets (even those with count 0). Callers can filter
     /// non-empty buckets with `.filter(|b| b.count > 0)`.
-    pub fn bucket_data(&self) -> impl Iterator<Item = BucketRef<'_, WIDTH>> + '_ {
+    pub fn bucket_data(&self) -> impl Iterator<Item = BucketRef<'_>> + '_ {
         (0..self.num_buckets()).map(|i| self.bucket(i))
     }
 
@@ -279,38 +277,78 @@ impl<T, const WIDTH: usize> Histogram<T, WIDTH> {
         self.aggregate_buckets[index]
     }
 
-    /// Returns the number of buckets for this `WIDTH` (compile-time constant).
-    pub const fn total_buckets() -> usize {
-        LogScale::<WIDTH>::total_buckets()
-    }
-
     /// Returns the number of buckets.
-    pub const fn num_buckets(&self) -> usize {
-        Self::total_buckets()
+    pub fn num_buckets(&self) -> usize {
+        self.log_scale.num_buckets()
     }
 
     /// Returns an incremental cursor for computing cumulative counts
     /// at monotonically increasing positions.
-    pub fn cumulative_count(&self) -> CumulativeCount<'_, T, WIDTH> {
+    pub fn cumulative_count(&self) -> CumulativeCount<'_, T> {
         CumulativeCount::new(self)
     }
 
     /// Returns a lazy reference to the bucket at the given index.
-    pub fn bucket(&self, index: usize) -> BucketRef<'_, WIDTH> {
+    pub fn bucket(&self, index: usize) -> BucketRef<'_> {
         BucketRef::new(self.log_scale, index, self.aggregate_buckets[index])
     }
 
+    /// Re-bins this histogram into a different log scale.
+    ///
+    /// For each target bucket `[left, right)`, estimates the sample count via
+    /// `count_below(right) - count_below(left)` using f64 CDF values, then
+    /// rounds to the nearest integer while tracking the fractional remainder
+    /// to preserve the exact total.
+    pub fn rescale(&self, width: usize) -> Histogram<T> {
+        let mut target = Histogram::with_log_scale(width, 1);
+        let mut cursor = CumulativeCount::new(self);
+        let mut prev_cdf = 0u64;
+
+        for new_index in 0..target.num_buckets() {
+            let new_right = target.bucket_right(new_index);
+            let cdf_right = cursor.count_below(new_right);
+            println!(
+                "new_index={new_index} new_right={new_right} cdf_right={cdf_right}, src_bucket={}, src_cumulative={}",
+                cursor.current_bucket(),
+                cursor.whole_bucket_accumulated()
+            );
+
+            let cdf_right = cdf_right.round() as u64;
+
+            let count = cdf_right - prev_cdf;
+
+            if count > 0 {
+                target.record_n(target.bucket_left(new_index), count);
+            }
+
+            prev_cdf = cdf_right;
+        }
+
+        target
+    }
+
     /// Returns a display wrapper that prints non-empty buckets, one per line.
-    pub fn display_buckets(&self) -> DisplayBuckets<'_, T, WIDTH> {
+    pub fn display_buckets(&self) -> DisplayBuckets<'_, T> {
         DisplayBuckets::new(self)
+    }
+
+    pub(crate) fn bucket_left(&self, index: usize) -> u64 {
+        self.log_scale.bucket_left(index)
+    }
+
+    pub(crate) fn bucket_right(&self, index: usize) -> u64 {
+        self.log_scale.bucket_right(index)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::histogram::LogScale3;
     use crate::histogram::LogScaleConfig;
+
+    fn scale() -> &'static LogScale {
+        LogScale::get(3)
+    }
 
     #[test]
     fn test_slot_clear() {
@@ -345,8 +383,8 @@ mod tests {
         assert_eq!(hist.total(), 4);
         assert_eq!(hist.get_bucket(1), 1);
         assert_eq!(hist.get_bucket(5), 1);
-        assert_eq!(hist.get_bucket(LogScale3::calculate_bucket_uncached(10)), 1);
-        assert_eq!(hist.get_bucket(LogScale3::calculate_bucket_uncached(100)), 1);
+        assert_eq!(hist.get_bucket(scale().calculate_bucket(10)), 1);
+        assert_eq!(hist.get_bucket(scale().calculate_bucket(100)), 1);
     }
 
     #[test]
@@ -369,8 +407,8 @@ mod tests {
         hist.record_n(100, 3);
 
         assert_eq!(hist.total(), 8);
-        assert_eq!(hist.get_bucket(LogScale3::calculate_bucket_uncached(10)), 5);
-        assert_eq!(hist.get_bucket(LogScale3::calculate_bucket_uncached(100)), 3);
+        assert_eq!(hist.get_bucket(scale().calculate_bucket(10)), 5);
+        assert_eq!(hist.get_bucket(scale().calculate_bucket(100)), 3);
     }
 
     #[test]
@@ -384,15 +422,15 @@ mod tests {
         }
 
         assert_eq!(hist_n.total(), hist_single.total());
-        let bucket = LogScale3::calculate_bucket_uncached(42);
+        let bucket = scale().calculate_bucket(42);
         assert_eq!(hist_n.get_bucket(bucket), hist_single.get_bucket(bucket));
     }
 
     #[test]
     fn test_u64_max_coverage() {
-        let max_bucket = LogScale3::calculate_bucket_uncached(u64::MAX);
+        let max_bucket = scale().calculate_bucket_uncached(u64::MAX);
         assert_eq!(max_bucket, 251, "u64::MAX should map to bucket 251");
-        assert_eq!(LogScaleConfig::<3>::BUCKETS, 252, "Should need exactly 252 buckets");
+        assert_eq!(LogScaleConfig::new(3).buckets(), 252, "Should need exactly 252 buckets");
 
         // Verify new() creates enough buckets to record u64::MAX
         let mut hist: Histogram = Histogram::new();
@@ -795,12 +833,12 @@ mod tests {
         ($name:ident, $width:expr) => {
             #[test]
             fn $name() {
-                use std::sync::LazyLock;
-                static SCALE: LazyLock<LogScale<{ $width }>> = LazyLock::new(LogScale::new);
+                assert_eq!(
+                    LogScale::get($width).num_buckets(),
+                    LogScaleConfig::new($width).buckets()
+                );
 
-                assert_eq!(SCALE.num_buckets(), LogScaleConfig::<{ $width }>::BUCKETS);
-
-                let mut hist = Histogram::<(), { $width }>::with_log_scale(&SCALE, 2);
+                let mut hist = Histogram::<()>::with_log_scale($width, 2);
 
                 // Edge values: 0, 1, u64::MAX
                 hist.record(0);
@@ -853,6 +891,99 @@ mod tests {
         hist.record(1000);
         hist.record(1000);
         assert_eq!(hist.total(), 2);
+    }
+
+    #[test]
+    fn test_rescale() {
+        use std::collections::BTreeMap;
+
+        let mut src = Histogram::<()>::with_log_scale(2, 1);
+        src.record_n(10, 20);
+        src.record_n(100, 30);
+        src.record_n(1000, 50);
+
+        let rescaled = src.rescale(5);
+
+        println!("src:\n{}", src.display_buckets());
+        println!("rescaled:\n{}", rescaled.display_buckets());
+
+        assert_eq!(rescaled.total(), 100);
+
+        let ranks: Vec<u64> = (1..=100).step_by(5).collect();
+
+        let old_values: BTreeMap<u64, u64> = ranks.iter().map(|&r| (r, src.value_at_rank(r))).collect();
+        let new_values: BTreeMap<u64, u64> = ranks.iter().map(|&r| (r, rescaled.value_at_rank(r))).collect();
+
+        println!("rank → old(W=2) / new(W=5):");
+        for &r in &ranks {
+            println!("  {r:>3} → {:>5} / {:>5}", old_values[&r], new_values[&r]);
+        }
+
+        assert_eq!(
+            old_values,
+            BTreeMap::from([
+                (1, 8),
+                (6, 9),
+                (11, 10),
+                (16, 11),
+                (21, 97),
+                (26, 102),
+                (31, 107),
+                (36, 113),
+                (41, 118),
+                (46, 123),
+                (51, 773),
+                (56, 798),
+                (61, 824),
+                (66, 849),
+                (71, 875),
+                (76, 901),
+                (81, 926),
+                (86, 952),
+                (91, 977),
+                (96, 1003),
+            ])
+        );
+
+        assert_eq!(
+            new_values,
+            BTreeMap::from([
+                (1, 8),
+                (6, 9),
+                (11, 10),
+                (16, 11),
+                (21, 97),
+                (26, 101),
+                (31, 107),
+                (36, 113),
+                (41, 117),
+                (46, 123),
+                (51, 774),
+                (56, 799),
+                (61, 822),
+                (66, 847),
+                (71, 874),
+                (76, 901),
+                (81, 927),
+                (86, 950),
+                (91, 975),
+                (96, 1001),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_rescale_roundtrip() {
+        let mut src = Histogram::<()>::with_log_scale(2, 1);
+        src.record_n(10, 20);
+        src.record_n(100, 30);
+        src.record_n(1000, 50);
+
+        let fine = src.rescale(5);
+        let back = fine.rescale(2);
+
+        assert_eq!(back.total(), src.total());
+        assert_eq!(back.display_buckets().to_string(), src.display_buckets().to_string());
     }
 
     test_histogram_width_edge_cases!(test_width_edge_1, 1);

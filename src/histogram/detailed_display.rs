@@ -8,17 +8,17 @@ use super::ascii_chart::digit_count;
 /// Detailed ASCII chart display, with header and percentile summary.
 ///
 /// Created by [`AsciiChart::detailed`]. Renders lazily via [`fmt::Display`].
-pub struct DetailedDisplay<'a, T, const WIDTH: usize> {
-    chart: &'a AsciiChart<T, WIDTH>,
+pub struct DetailedDisplay<'a, T> {
+    chart: &'a AsciiChart<T>,
 }
 
-impl<'a, T, const WIDTH: usize> DetailedDisplay<'a, T, WIDTH> {
-    pub(crate) fn new(chart: &'a AsciiChart<T, WIDTH>) -> Self {
+impl<'a, T> DetailedDisplay<'a, T> {
+    pub(crate) fn new(chart: &'a AsciiChart<T>) -> Self {
         Self { chart }
     }
 }
 
-impl<T, const WIDTH: usize> fmt::Display for DetailedDisplay<'_, T, WIDTH> {
+impl<T> fmt::Display for DetailedDisplay<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let indices = self.chart.non_empty_indices();
         if indices.is_empty() {
