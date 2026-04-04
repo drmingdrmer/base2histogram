@@ -47,10 +47,12 @@ impl<'a, T, const WIDTH: usize> Density<'a, T, WIDTH> {
         (dr - dl) / (br.midpoint() as f64 - bl.midpoint() as f64)
     }
 
-    /// Computes the cumulative sample count from `bucket.left()` up to
-    /// `bucket.left() + x` using trapezoidal density estimation.
+    /// Computes the estimated sample count in `[bucket.left(), bucket.left() + x)`
+    /// using trapezoidal density estimation.
     ///
     /// `x` is the offset from the bucket's left boundary.
+    /// Since the underlying density is continuous, the boundary is
+    /// effectively neither open nor closed (a single point has zero measure).
     ///
     /// Models the density inside the bucket as a linear function:
     ///
@@ -78,6 +80,31 @@ impl<'a, T, const WIDTH: usize> Density<'a, T, WIDTH> {
         // d(x) = a + k·x, where a = d1 - k·w/2 is density at left edge
         let a = d1 - k * w / 2.0;
         a * x + k * x * x / 2.0
+    }
+
+    /// Returns the estimated cumulative count of samples in `[0, position)`,
+    /// i.e., strictly below `position`, across all buckets.
+    ///
+    /// Sums the full count of every bucket entirely before `position`,
+    /// then adds the partial count within the bucket containing `position`
+    /// using `trapezoidal_cdf`.
+    pub fn cumulative_count(&self, position: u64) -> f64 {
+        let mut total = 0.0;
+
+        for i in 0..self.hist.num_buckets() {
+            let b = self.hist.bucket(i);
+
+            if position >= b.right() {
+                // Entire bucket is before position
+                total += b.count() as f64;
+            } else {
+                // Position falls within this bucket
+                total += self.trapezoidal_cdf(i, position - b.left());
+                break;
+            }
+        }
+
+        total
     }
 }
 
@@ -339,5 +366,108 @@ mod tests {
 
         let c = cdf(r, 12, 2);
         assert!((c - 50.0).abs() < 1e-10);
+    }
+
+    // === cumulative_count tests ===
+
+    fn cum(records: &[(u64, u64)], position: u64) -> f64 {
+        let h = make_hist(records);
+        Density::new(&h).cumulative_count(position)
+    }
+
+    #[test]
+    fn test_cum_zero() {
+        // Empty histogram
+        let c = cum(&[], 100);
+        assert!(c.abs() < 1e-10);
+
+        // Position before all data
+        let c = cum(&[(10, 100)], 5);
+        assert!(c.abs() < 1e-10);
+
+        // Position 0 with data in bucket 0: x=0 → cdf=0
+        let c = cum(&[(0, 50)], 0);
+        assert!(c.abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cum_past_all_data() {
+        // Single bucket
+        let c = cum(&[(10, 100)], 100);
+        assert!((c - 100.0).abs() < 1e-10);
+
+        // Multiple buckets
+        let c = cum(&[(8, 10), (10, 20), (12, 30)], 14);
+        assert!((c - 60.0).abs() < 1e-10);
+
+        // Scattered data: total must match hist.total()
+        let r = &[(0, 5), (5, 10), (10, 20), (100, 50)];
+        let h = make_hist(r);
+        let c = Density::new(&h).cumulative_count(u64::MAX);
+        assert!((c - h.total() as f64).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cum_at_bucket_boundary() {
+        // Position 10 = right of bucket 8 [8,10) = left of bucket 9 [10,12)
+        // Should include all of bucket 8, none of bucket 9
+        let c = cum(&[(8, 20), (10, 50)], 10);
+        assert!((c - 20.0).abs() < 1e-10);
+
+        // Position 1 = right of bucket 0 [0,1)
+        let c = cum(&[(0, 10), (1, 20)], 1);
+        assert!((c - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cum_single_bucket_midpoint() {
+        // Bucket 9: [10,12) w=2, count=100, no neighbors → uniform
+        let c = cum(&[(10, 100)], 11);
+        assert!((c - 50.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cum_partial_bucket() {
+        // Buckets 8,9,10: [8,10) c=10, [10,12) c=20, [12,14) c=30
+        // Position 11 = midpoint of bucket 9
+        // Total = 10 (full bucket 8) + trapezoidal_cdf(9, 1)
+        let r = &[(8, 10), (10, 20), (12, 30)];
+
+        let c = cum(r, 11);
+        let expected = 10.0 + cdf(r, 9, 1);
+        assert!((c - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cum_monotonicity() {
+        let r = &[(8, 10), (10, 20), (12, 30)];
+        let mut prev = 0.0;
+        for pos in [0, 5, 8, 9, 10, 11, 12, 13, 14, 100] {
+            let c = cum(r, pos);
+            assert!(c >= prev, "cum({pos}) = {c} < prev = {prev}");
+            prev = c;
+        }
+    }
+
+    #[test]
+    fn test_cum_last_bucket() {
+        let r = &[(0b111 << 61, 100)];
+
+        // Before last bucket → 0
+        let c = cum(r, 0b110 << 61);
+        assert!(c.abs() < 1e-10);
+
+        // Inside last bucket, near the end
+        let c = cum(r, u64::MAX - 1);
+        assert!(c > 0.0);
+        assert!(c <= 100.0);
+    }
+
+    #[test]
+    fn test_cum_gap_between_buckets() {
+        // Bucket 5: [5,6) c=10, Bucket 12: [16,20) c=40
+        // Position 10 is in an empty bucket between them
+        let c = cum(&[(5, 10), (16, 40)], 10);
+        assert!((c - 10.0).abs() < 1e-10);
     }
 }
