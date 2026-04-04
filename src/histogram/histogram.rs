@@ -1,4 +1,5 @@
 use super::bucket_ref::BucketRef;
+use super::density::Density;
 use super::log_scale::LOG_SCALE;
 use super::log_scale::LogScale;
 use super::percentile_stats::PercentileStats;
@@ -240,6 +241,13 @@ impl<T, const WIDTH: usize> Histogram<T, WIDTH> {
         0
     }
 
+    /// Returns the estimated count of samples in `[0, position)`,
+    /// i.e., strictly below `position`, using trapezoidal density
+    /// interpolation within buckets.
+    pub fn count_below(&self, position: u64) -> u64 {
+        Density::new(self).count_below(position) as u64
+    }
+
     /// Returns common percentile statistics: samples, P0.1, P1, P5, P10, P50, P90, P99, P99.9.
     pub fn percentile_stats(&self) -> PercentileStats {
         let samples = self.total();
@@ -425,6 +433,61 @@ mod tests {
 
         // Rank beyond total returns 0
         assert_eq!(hist.value_at_rank(14), 0);
+    }
+
+    #[test]
+    fn test_count_below() {
+        let mut hist: Histogram = Histogram::new();
+
+        // 10 samples at value 5 (bucket [5,6)), 20 samples at value 100 (bucket [96,112))
+        hist.record_n(5, 10);
+        hist.record_n(100, 20);
+
+        // Before any samples
+        assert_eq!(hist.count_below(0), 0);
+        assert_eq!(hist.count_below(5), 0);
+
+        // At bucket [5,6) right boundary: all 10 counted
+        assert_eq!(hist.count_below(6), 10);
+
+        // Between the two buckets: still 10
+        assert_eq!(hist.count_below(50), 10);
+        assert_eq!(hist.count_below(96), 10);
+
+        // Within bucket [96,112), width=16, count=20:
+        //   count_below(100) = 10 + 20 * (100-96)/16 = 10 + 5 = 15
+        //   count_below(104) = 10 + 20 * (104-96)/16 = 10 + 10 = 20
+        //   count_below(108) = 10 + 20 * (108-96)/16 = 10 + 15 = 25
+        assert_eq!(hist.count_below(100), 15);
+        assert_eq!(hist.count_below(104), 20);
+        assert_eq!(hist.count_below(108), 25);
+
+        // At right boundary: all 30
+        assert_eq!(hist.count_below(112), 30);
+
+        // Beyond all buckets
+        assert_eq!(hist.count_below(1000), 30);
+
+        // Trapezoidal case: three adjacent buckets with unequal counts.
+        // Bucket 8:[8,10) count=10, bucket 9:[10,12) count=20, bucket 10:[12,14) count=40
+        // density_slope for bucket 9 uses d0=10/2=5, d2=40/2=20, m0=9, m2=13
+        // k = (20-5)/(13-9) = 3.75, s = k*2 = 7.5
+        // d1 = 20/2 = 10
+        // CDF: C(t) = (10 - 3.75)*t + 7.5*t^2/2 = 6.25*t + 3.75*t^2
+        // C(1) = 10 = d1 ✓
+        // fraction = C(t)/10
+        let mut hist2: Histogram = Histogram::new();
+        hist2.record_n(8, 10);
+        hist2.record_n(10, 20);
+        hist2.record_n(12, 40);
+
+        // t=0 → fraction=0
+        assert_eq!(hist2.count_below(10), 10);
+        // t=0.5 → C(0.5) = 6.25*0.5 + 3.75*0.25 = 3.125 + 0.9375 = 4.0625
+        //          fraction = 4.0625/10 = 0.40625 → partial = floor(20 * 0.40625) = 8
+        assert_eq!(hist2.count_below(11), 10 + 8);
+        // t=1.0 → full bucket: all 20
+        assert_eq!(hist2.count_below(12), 10 + 20);
     }
 
     #[test]
