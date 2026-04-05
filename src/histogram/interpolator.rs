@@ -1,15 +1,15 @@
 use super::histogram::Histogram;
 
-/// A read-only computational view for density analysis over a histogram.
+/// Interpolates between discrete histogram buckets to produce continuous estimates.
 ///
-/// Provides derived calculations such as density slopes and trapezoidal
-/// interpolation, without modifying the underlying histogram.
+/// Uses trapezoidal density estimation with neighbor bucket slopes
+/// to compute partial-bucket counts and cumulative distributions.
 #[derive(Clone, Copy)]
-pub struct Density<'a, T = ()> {
+pub struct Interpolator<'a, T = ()> {
     pub(super) hist: &'a Histogram<T>,
 }
 
-impl<'a, T> Density<'a, T> {
+impl<'a, T> Interpolator<'a, T> {
     pub fn new(hist: &'a Histogram<T>) -> Self {
         Self { hist }
     }
@@ -133,7 +133,7 @@ mod tests {
 
     fn slope(records: &[(u64, u64)], bucket: usize) -> f64 {
         let h = make_hist(records);
-        Density::new(&h).density_slope(bucket)
+        Interpolator::new(&h).density_slope(bucket)
     }
 
     // === density_slope tests ===
@@ -222,7 +222,7 @@ mod tests {
 
     fn cdf(records: &[(u64, u64)], bucket: usize, x: u64) -> f64 {
         let h = make_hist(records);
-        Density::new(&h).trapezoidal_cdf(bucket, x)
+        Interpolator::new(&h).trapezoidal_cdf(bucket, x)
     }
 
     #[test]
@@ -383,7 +383,7 @@ mod tests {
 
     fn count_below(records: &[(u64, u64)], position: u64) -> f64 {
         let h = make_hist(records);
-        Density::new(&h).count_below(position)
+        Interpolator::new(&h).count_below(position)
     }
 
     #[test]
@@ -414,7 +414,7 @@ mod tests {
         // Scattered data: total must match hist.total()
         let r = &[(0, 5), (5, 10), (10, 20), (100, 50)];
         let h = make_hist(r);
-        let c = Density::new(&h).count_below(u64::MAX);
+        let c = Interpolator::new(&h).count_below(u64::MAX);
         assert!((c - h.total() as f64).abs() < 1e-6);
     }
 

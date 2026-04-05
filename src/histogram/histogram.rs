@@ -1,6 +1,6 @@
 use super::bucket_ref::BucketRef;
 use super::cumulative_count::CumulativeCount;
-use super::density::Density;
+use super::interpolator::Interpolator;
 use super::log_scale::LogScale;
 use super::percentile_stats::PercentileStats;
 use super::slot::Slot;
@@ -242,10 +242,10 @@ impl<T> Histogram<T> {
     }
 
     /// Returns the estimated count of samples in `[0, position)`,
-    /// i.e., strictly below `position`, using trapezoidal density
+    /// i.e., strictly below `position`, using trapezoidal
     /// interpolation within buckets.
     pub fn count_below(&self, position: u64) -> u64 {
-        Density::new(self).count_below(position) as u64
+        Interpolator::new(self).count_below(position) as u64
     }
 
     /// Returns common percentile statistics: samples, P0.1, P1, P5, P10, P50, P90, P99, P99.9.
@@ -300,7 +300,7 @@ impl<T> Histogram<T> {
     /// rounds to the nearest integer while tracking the fractional remainder
     /// to preserve the exact total.
     pub fn rescale(&self, width: usize) -> Histogram<T> {
-        let mut target = Histogram::with_log_scale(width, 1);
+        let mut target = Histogram::<T>::with_log_scale(width, 1);
         let mut cursor = CumulativeCount::new(self);
         let mut prev_cdf = 0u64;
 

@@ -1,8 +1,8 @@
-use super::density::Density;
 use super::histogram::Histogram;
+use super::interpolator::Interpolator;
 
 /// An incremental cursor for computing cumulative counts at monotonically
-/// increasing positions over a histogram's density model.
+/// increasing positions over a histogram's interpolation model.
 ///
 /// Maintains internal state (current bucket index and accumulated total)
 /// so that each `count_below` call resumes scanning from where the previous
@@ -10,7 +10,7 @@ use super::histogram::Histogram;
 ///
 /// Each `position` passed to `count_below` must be >= the previous one.
 pub struct CumulativeCount<'a, T = ()> {
-    density: Density<'a, T>,
+    interpolator: Interpolator<'a, T>,
 
     /// Index of the bucket containing or following the last queried position.
     bucket_index: usize,
@@ -22,7 +22,7 @@ pub struct CumulativeCount<'a, T = ()> {
 impl<'a, T> CumulativeCount<'a, T> {
     pub fn new(hist: &'a Histogram<T>) -> Self {
         Self {
-            density: Density::new(hist),
+            interpolator: Interpolator::new(hist),
             bucket_index: 0,
             accumulated: 0,
         }
@@ -44,10 +44,10 @@ impl<'a, T> CumulativeCount<'a, T> {
     ///
     /// Panics in debug builds if `position` would require scanning backward.
     pub fn count_below(&mut self, position: u64) -> f64 {
-        let num_buckets = self.density.hist.num_buckets();
+        let num_buckets = self.interpolator.hist.num_buckets();
 
         while self.bucket_index < num_buckets {
-            let b = self.density.hist.bucket(self.bucket_index);
+            let b = self.interpolator.hist.bucket(self.bucket_index);
 
             debug_assert!(
                 position >= b.left(),
@@ -59,7 +59,7 @@ impl<'a, T> CumulativeCount<'a, T> {
                 self.bucket_index += 1;
             } else {
                 // Position falls within this bucket
-                let partial = self.density.trapezoidal_cdf(self.bucket_index, position - b.left());
+                let partial = self.interpolator.trapezoidal_cdf(self.bucket_index, position - b.left());
                 return self.accumulated as f64 + partial;
             }
         }
@@ -87,7 +87,7 @@ mod tests {
 
     fn count_below_oneshot(records: &[(u64, u64)], position: u64) -> f64 {
         let h = make_hist(records);
-        Density::new(&h).count_below(position)
+        Interpolator::new(&h).count_below(position)
     }
 
     #[test]
