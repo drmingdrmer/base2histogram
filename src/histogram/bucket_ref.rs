@@ -1,16 +1,16 @@
 use std::fmt;
 use std::fmt::Formatter;
 
+use super::bucket_span::BucketSpan;
 use super::log_scale::LogScale;
 
 /// A lazy reference to a single bucket in a histogram.
 ///
-/// Holds a reference to the log scale and the bucket index.
-/// Left/right boundary values are computed only when the corresponding method is called.
+/// Combines bucket geometry with a sample count.
+/// Boundary values are computed only when the corresponding method is called.
 #[derive(Debug, Clone, Copy)]
 pub struct BucketRef<'a> {
-    log_scale: &'a LogScale,
-    index: usize,
+    span: BucketSpan<'a>,
     count: u64,
 }
 
@@ -30,38 +30,49 @@ impl fmt::Display for BucketRef<'_> {
 impl<'a> BucketRef<'a> {
     pub(crate) fn new(log_scale: &'a LogScale, index: usize, count: u64) -> Self {
         Self {
-            log_scale,
-            index,
+            span: BucketSpan::new(log_scale, index),
             count,
         }
     }
 
-    /// The left close value that maps to this bucket.
-    pub fn left(&self) -> u64 {
-        self.log_scale.bucket_left(self.index)
-    }
-
-    /// The right open boundary that maps to this bucket.
-    pub fn right(&self) -> u64 {
-        self.log_scale.bucket_right(self.index)
+    /// Returns the bucket geometry.
+    #[inline]
+    pub fn span(&self) -> &BucketSpan<'a> {
+        &self.span
     }
 
     /// Bucket index.
+    #[inline]
     pub fn index(&self) -> usize {
-        self.index
+        self.span.index()
+    }
+
+    /// The left close value that maps to this bucket.
+    #[inline]
+    pub fn left(&self) -> u64 {
+        self.span.left()
+    }
+
+    /// The right open boundary that maps to this bucket.
+    #[inline]
+    pub fn right(&self) -> u64 {
+        self.span.right()
     }
 
     /// Width of the bucket: `right - left`.
+    #[inline]
     pub fn width(&self) -> u64 {
-        self.right() - self.left()
+        self.span.width()
     }
 
     /// Midpoint of the bucket: `left + width / 2`.
+    #[inline]
     pub fn midpoint(&self) -> u64 {
-        self.left() + self.width() / 2
+        self.span.midpoint()
     }
 
     /// The number of samples recorded in this bucket.
+    #[inline]
     pub fn count(&self) -> u64 {
         self.count
     }
