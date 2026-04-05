@@ -245,7 +245,12 @@ impl<T> Histogram<T> {
     /// i.e., strictly below `position`, using trapezoidal
     /// interpolation within buckets.
     pub fn count_below(&self, position: u64) -> u64 {
-        Interpolator::new(self).count_below(position) as u64
+        self.interpolator().count_below(position) as u64
+    }
+
+    /// Returns an [`Interpolator`] over the aggregate bucket counts.
+    pub fn interpolator(&self) -> Interpolator<'_> {
+        Interpolator::new(self.log_scale, &self.aggregate_buckets)
     }
 
     /// Returns common percentile statistics: samples, P0.1, P1, P5, P10, P50, P90, P99, P99.9.
@@ -284,8 +289,8 @@ impl<T> Histogram<T> {
 
     /// Returns an incremental cursor for computing cumulative counts
     /// at monotonically increasing positions.
-    pub fn cumulative_count(&self) -> CumulativeCount<'_, T> {
-        CumulativeCount::new(self)
+    pub fn cumulative_count(&self) -> CumulativeCount<'_> {
+        CumulativeCount::new(self.log_scale, &self.aggregate_buckets)
     }
 
     /// Returns a lazy reference to the bucket at the given index.
@@ -301,7 +306,7 @@ impl<T> Histogram<T> {
     /// to preserve the exact total.
     pub fn rescale(&self, width: usize) -> Histogram<T> {
         let mut target = Histogram::<T>::with_log_scale(width, 1);
-        let mut cursor = CumulativeCount::new(self);
+        let mut cursor = self.cumulative_count();
         let mut prev_cdf = 0u64;
 
         for new_index in 0..target.num_buckets() {

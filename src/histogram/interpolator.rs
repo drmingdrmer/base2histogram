@@ -1,17 +1,34 @@
-use super::histogram::Histogram;
+use super::bucket_ref::BucketRef;
+use super::log_scale::LogScale;
 
 /// Interpolates between discrete histogram buckets to produce continuous estimates.
 ///
 /// Uses trapezoidal density estimation with neighbor bucket slopes
 /// to compute partial-bucket counts and cumulative distributions.
+///
+/// Operates on a `&LogScale` (for bucket geometry) and a `&[u64]` slice
+/// of bucket counts, independent of any particular histogram instance.
 #[derive(Clone, Copy)]
-pub struct Interpolator<'a, T = ()> {
-    pub(super) hist: &'a Histogram<T>,
+pub struct Interpolator<'a> {
+    log_scale: &'a LogScale,
+    buckets: &'a [u64],
 }
 
-impl<'a, T> Interpolator<'a, T> {
-    pub fn new(hist: &'a Histogram<T>) -> Self {
-        Self { hist }
+impl<'a> Interpolator<'a> {
+    pub fn new(log_scale: &'a LogScale, buckets: &'a [u64]) -> Self {
+        Self { log_scale, buckets }
+    }
+
+    /// Returns the number of buckets.
+    #[inline]
+    pub fn num_buckets(&self) -> usize {
+        self.log_scale.num_buckets()
+    }
+
+    /// Returns a reference to the bucket at the given index.
+    #[inline]
+    pub fn bucket(&self, index: usize) -> BucketRef<'_> {
+        BucketRef::new(self.log_scale, index, self.buckets[index])
     }
 
     /// Computes the density slope at `bucket`.
@@ -29,7 +46,7 @@ impl<'a, T> Interpolator<'a, T> {
     /// For the first bucket, uses self and the right neighbor.
     /// For the last bucket, uses the left neighbor and self.
     pub fn density_slope(&self, bucket: usize) -> f64 {
-        let last = self.hist.num_buckets() - 1;
+        let last = self.num_buckets() - 1;
 
         let (left, right) = if bucket == 0 {
             (bucket, bucket + 1)
@@ -39,8 +56,8 @@ impl<'a, T> Interpolator<'a, T> {
             (bucket - 1, bucket + 1)
         };
 
-        let bl = self.hist.bucket(left);
-        let br = self.hist.bucket(right);
+        let bl = self.bucket(left);
+        let br = self.bucket(right);
 
         let dl = bl.count() as f64 / bl.width() as f64;
         let dr = br.count() as f64 / br.width() as f64;
@@ -71,7 +88,7 @@ impl<'a, T> Interpolator<'a, T> {
     ///   C(x) = a·x + k·x²/2
     /// ```
     pub fn trapezoidal_cdf(&self, bucket: usize, x: u64) -> f64 {
-        let b = self.hist.bucket(bucket);
+        let b = self.bucket(bucket);
         let w = b.width() as f64;
         let x = x as f64;
 
@@ -102,14 +119,12 @@ impl<'a, T> Interpolator<'a, T> {
     pub fn count_below(&self, position: u64) -> f64 {
         let mut total = 0.0;
 
-        for i in 0..self.hist.num_buckets() {
-            let b = self.hist.bucket(i);
+        for i in 0..self.num_buckets() {
+            let b = self.bucket(i);
 
             if position >= b.right() {
-                // Entire bucket is before position
                 total += b.count() as f64;
             } else {
-                // Position falls within this bucket
                 total += self.trapezoidal_cdf(i, position - b.left());
                 break;
             }
@@ -121,7 +136,7 @@ impl<'a, T> Interpolator<'a, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::histogram::Histogram;
 
     fn make_hist(records: &[(u64, u64)]) -> Histogram<()> {
         let mut hist = Histogram::<()>::new();
@@ -133,7 +148,7 @@ mod tests {
 
     fn slope(records: &[(u64, u64)], bucket: usize) -> f64 {
         let h = make_hist(records);
-        Interpolator::new(&h).density_slope(bucket)
+        h.interpolator().density_slope(bucket)
     }
 
     // === density_slope tests ===
@@ -222,7 +237,7 @@ mod tests {
 
     fn cdf(records: &[(u64, u64)], bucket: usize, x: u64) -> f64 {
         let h = make_hist(records);
-        Interpolator::new(&h).trapezoidal_cdf(bucket, x)
+        h.interpolator().trapezoidal_cdf(bucket, x)
     }
 
     #[test]
@@ -383,7 +398,7 @@ mod tests {
 
     fn count_below(records: &[(u64, u64)], position: u64) -> f64 {
         let h = make_hist(records);
-        Interpolator::new(&h).count_below(position)
+        h.interpolator().count_below(position)
     }
 
     #[test]
@@ -414,7 +429,7 @@ mod tests {
         // Scattered data: total must match hist.total()
         let r = &[(0, 5), (5, 10), (10, 20), (100, 50)];
         let h = make_hist(r);
-        let c = Interpolator::new(&h).count_below(u64::MAX);
+        let c = h.interpolator().count_below(u64::MAX);
         assert!((c - h.total() as f64).abs() < 1e-6);
     }
 

@@ -1,5 +1,5 @@
-use super::histogram::Histogram;
 use super::interpolator::Interpolator;
+use super::log_scale::LogScale;
 
 /// An incremental cursor for computing cumulative counts at monotonically
 /// increasing positions over a histogram's interpolation model.
@@ -9,8 +9,8 @@ use super::interpolator::Interpolator;
 /// call left off, rather than re-scanning from bucket 0.
 ///
 /// Each `position` passed to `count_below` must be >= the previous one.
-pub struct CumulativeCount<'a, T = ()> {
-    interpolator: Interpolator<'a, T>,
+pub struct CumulativeCount<'a> {
+    interpolator: Interpolator<'a>,
 
     /// Index of the bucket containing or following the last queried position.
     bucket_index: usize,
@@ -19,10 +19,10 @@ pub struct CumulativeCount<'a, T = ()> {
     accumulated: u64,
 }
 
-impl<'a, T> CumulativeCount<'a, T> {
-    pub fn new(hist: &'a Histogram<T>) -> Self {
+impl<'a> CumulativeCount<'a> {
+    pub fn new(log_scale: &'a LogScale, buckets: &'a [u64]) -> Self {
         Self {
-            interpolator: Interpolator::new(hist),
+            interpolator: Interpolator::new(log_scale, buckets),
             bucket_index: 0,
             accumulated: 0,
         }
@@ -44,10 +44,10 @@ impl<'a, T> CumulativeCount<'a, T> {
     ///
     /// Panics in debug builds if `position` would require scanning backward.
     pub fn count_below(&mut self, position: u64) -> f64 {
-        let num_buckets = self.interpolator.hist.num_buckets();
+        let num_buckets = self.interpolator.num_buckets();
 
         while self.bucket_index < num_buckets {
-            let b = self.interpolator.hist.bucket(self.bucket_index);
+            let b = self.interpolator.bucket(self.bucket_index);
 
             debug_assert!(
                 position >= b.left(),
@@ -71,6 +71,7 @@ impl<'a, T> CumulativeCount<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::histogram::Histogram;
 
     fn make_hist(records: &[(u64, u64)]) -> Histogram<()> {
         let mut hist = Histogram::<()>::new();
@@ -80,14 +81,14 @@ mod tests {
         hist
     }
 
-    fn make_cursor(records: &[(u64, u64)]) -> CumulativeCount<'static, ()> {
+    fn make_cursor(records: &[(u64, u64)]) -> CumulativeCount<'static> {
         let hist = Box::leak(Box::new(make_hist(records)));
-        CumulativeCount::new(hist)
+        hist.cumulative_count()
     }
 
     fn count_below_oneshot(records: &[(u64, u64)], position: u64) -> f64 {
         let h = make_hist(records);
-        Interpolator::new(&h).count_below(position)
+        h.interpolator().count_below(position)
     }
 
     #[test]
@@ -260,7 +261,7 @@ mod tests {
         let r = &[(0, 5), (5, 10), (10, 20), (100, 50)];
         let h = Box::leak(Box::new(make_hist(r)));
         let total = h.total() as f64;
-        let mut cursor = CumulativeCount::new(h);
+        let mut cursor = h.cumulative_count();
 
         let c = cursor.count_below(u64::MAX);
         assert!((c - total).abs() < 1e-6);
