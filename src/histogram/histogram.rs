@@ -310,10 +310,11 @@ impl<T> Histogram<T> {
         let mut prev_cdf = 0u64;
 
         for new_index in 0..target.num_buckets() {
-            let new_right = target.bucket_right(new_index);
-            let cdf_right = cursor.count_below(new_right);
+            let b = target.bucket(new_index);
+            let cdf_right = cursor.count_below(b.right());
             println!(
-                "new_index={new_index} new_right={new_right} cdf_right={cdf_right}, src_bucket={}, src_cumulative={}",
+                "new_index={new_index} new_right={} cdf_right={cdf_right}, src_bucket={}, src_cumulative={}",
+                b.right(),
                 cursor.current_bucket(),
                 cursor.whole_bucket_accumulated()
             );
@@ -323,7 +324,7 @@ impl<T> Histogram<T> {
             let count = cdf_right - prev_cdf;
 
             if count > 0 {
-                target.record_n(target.bucket_left(new_index), count);
+                target.record_n(b.left(), count);
             }
 
             prev_cdf = cdf_right;
@@ -335,14 +336,6 @@ impl<T> Histogram<T> {
     /// Returns a display wrapper that prints non-empty buckets, one per line.
     pub fn display_buckets(&self) -> DisplayBuckets<'_, T> {
         DisplayBuckets::new(self)
-    }
-
-    pub(crate) fn bucket_left(&self, index: usize) -> u64 {
-        self.log_scale.bucket_left(index)
-    }
-
-    pub(crate) fn bucket_right(&self, index: usize) -> u64 {
-        self.log_scale.bucket_right(index)
     }
 }
 

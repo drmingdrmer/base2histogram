@@ -75,27 +75,6 @@ impl LogScale {
         BucketSpan::new(self, index)
     }
 
-    /// Returns the left boundary value for the given bucket index.
-    #[inline]
-    pub fn bucket_left(&self, index: usize) -> u64 {
-        self.bucket_span(index).left()
-    }
-
-    /// Returns the right open boundary value for the given bucket index.
-    ///
-    /// For the last bucket, returns `u64::MAX` since it overflows.
-    /// Thus, there is an inaccuracy
-    #[inline]
-    pub fn bucket_right(&self, index: usize) -> u64 {
-        self.bucket_span(index).right()
-    }
-
-    /// Returns the width of the bucket: `right - left`.
-    #[inline]
-    pub fn bucket_width(&self, index: usize) -> u64 {
-        self.bucket_span(index).width()
-    }
-
     /// Interpolates within a bucket using trapezoidal density estimation.
     ///
     /// Uses neighbor bucket densities to estimate a linear density gradient
@@ -324,58 +303,62 @@ mod tests {
 
     #[test]
     fn test_bucket_min_values_lookup_table() {
+        let s = LogScale::get(3);
+
         // Group 0: [0, 1, 2, 3]
-        assert_eq!(LogScale::get(3).bucket_left(0), 0);
-        assert_eq!(LogScale::get(3).bucket_left(1), 1);
-        assert_eq!(LogScale::get(3).bucket_left(2), 2);
-        assert_eq!(LogScale::get(3).bucket_left(3), 3);
+        assert_eq!(s.bucket_span(0).left(), 0);
+        assert_eq!(s.bucket_span(1).left(), 1);
+        assert_eq!(s.bucket_span(2).left(), 2);
+        assert_eq!(s.bucket_span(3).left(), 3);
 
         // Group 1: [4, 5, 6, 7]
-        assert_eq!(LogScale::get(3).bucket_left(4), 4);
-        assert_eq!(LogScale::get(3).bucket_left(5), 5);
-        assert_eq!(LogScale::get(3).bucket_left(6), 6);
-        assert_eq!(LogScale::get(3).bucket_left(7), 7);
+        assert_eq!(s.bucket_span(4).left(), 4);
+        assert_eq!(s.bucket_span(5).left(), 5);
+        assert_eq!(s.bucket_span(6).left(), 6);
+        assert_eq!(s.bucket_span(7).left(), 7);
 
         // Group 2: [8, 10, 12, 14]
-        assert_eq!(LogScale::get(3).bucket_left(8), 8);
-        assert_eq!(LogScale::get(3).bucket_left(9), 10);
-        assert_eq!(LogScale::get(3).bucket_left(10), 12);
-        assert_eq!(LogScale::get(3).bucket_left(11), 14);
+        assert_eq!(s.bucket_span(8).left(), 8);
+        assert_eq!(s.bucket_span(9).left(), 10);
+        assert_eq!(s.bucket_span(10).left(), 12);
+        assert_eq!(s.bucket_span(11).left(), 14);
 
         // Group 3: [16, 20, 24, 28]
-        assert_eq!(LogScale::get(3).bucket_left(12), 16);
-        assert_eq!(LogScale::get(3).bucket_left(13), 20);
-        assert_eq!(LogScale::get(3).bucket_left(14), 24);
-        assert_eq!(LogScale::get(3).bucket_left(15), 28);
+        assert_eq!(s.bucket_span(12).left(), 16);
+        assert_eq!(s.bucket_span(13).left(), 20);
+        assert_eq!(s.bucket_span(14).left(), 24);
+        assert_eq!(s.bucket_span(15).left(), 28);
     }
 
     #[test]
     fn test_bucket_width() {
+        let s = LogScale::get(3);
+
         // Group 0: single-value buckets, width=1
-        assert_eq!(LogScale::get(3).bucket_width(0), 1); // [0,1)
-        assert_eq!(LogScale::get(3).bucket_width(1), 1); // [1,2)
-        assert_eq!(LogScale::get(3).bucket_width(3), 1); // [3,4)
+        assert_eq!(s.bucket_span(0).width(), 1); // [0,1)
+        assert_eq!(s.bucket_span(1).width(), 1); // [1,2)
+        assert_eq!(s.bucket_span(3).width(), 1); // [3,4)
 
         // Group 1: still width=1
-        assert_eq!(LogScale::get(3).bucket_width(4), 1); // [4,5)
-        assert_eq!(LogScale::get(3).bucket_width(7), 1); // [7,8)
+        assert_eq!(s.bucket_span(4).width(), 1); // [4,5)
+        assert_eq!(s.bucket_span(7).width(), 1); // [7,8)
 
         // Group 2: width=2
-        assert_eq!(LogScale::get(3).bucket_width(8), 2); // [8,10)
-        assert_eq!(LogScale::get(3).bucket_width(11), 2); // [14,16)
+        assert_eq!(s.bucket_span(8).width(), 2); // [8,10)
+        assert_eq!(s.bucket_span(11).width(), 2); // [14,16)
 
         // Group 3: width=4
-        assert_eq!(LogScale::get(3).bucket_width(12), 4); // [16,20)
-        assert_eq!(LogScale::get(3).bucket_width(15), 4); // [28,32)
+        assert_eq!(s.bucket_span(12).width(), 4); // [16,20)
+        assert_eq!(s.bucket_span(15).width(), 4); // [28,32)
 
         // Group 4: width=8
-        assert_eq!(LogScale::get(3).bucket_width(16), 8); // [32,40)
+        assert_eq!(s.bucket_span(16).width(), 8); // [32,40)
 
         // Last bucket (251): right=u64::MAX, left=0b111<<61
-        assert_eq!(LogScale::get(3).bucket_width(251), u64::MAX - (0b111 << 61));
+        assert_eq!(s.bucket_span(251).width(), u64::MAX - (0b111 << 61));
 
         // Second-to-last bucket (250): step=2^61
-        assert_eq!(LogScale::get(3).bucket_width(250), 1 << 61);
+        assert_eq!(s.bucket_span(250).width(), 1 << 61);
     }
 
     #[test]
