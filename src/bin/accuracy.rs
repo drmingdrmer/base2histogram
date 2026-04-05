@@ -195,7 +195,7 @@ struct WidthResult {
 
 fn run_width_silent(width: usize, distributions: &[Distribution], results: &mut Vec<WidthResult>) {
     let buckets = LogScale::get(width).num_buckets();
-    let memory_bytes = 2 * buckets * size_of::<u64>();
+    let memory_bytes = buckets * size_of::<u64>();
 
     let errors: Vec<Vec<f64>> = distributions.iter().map(|dist| evaluate_silent(dist, width)).collect();
 
@@ -209,7 +209,7 @@ fn run_width_silent(width: usize, distributions: &[Distribution], results: &mut 
 
 fn run_width_verbose(width: usize, distributions: &[Distribution], results: &mut Vec<WidthResult>) {
     let buckets = LogScale::get(width).num_buckets();
-    let memory_bytes = 2 * buckets * size_of::<u64>();
+    let memory_bytes = buckets * size_of::<u64>();
 
     println!("\n{}", "=".repeat(60));
     println!("WIDTH={}  ({} buckets, {})", width, buckets, format_bytes(memory_bytes),);
@@ -266,9 +266,7 @@ fn main() {
     println!("          bits, giving 2^(WIDTH-1) buckets per group. Higher WIDTH");
     println!("          means finer resolution but more memory.");
     println!();
-    println!("  Memory: Per-slot = buckets x 8 bytes.");
-    println!("          Total for a 1-slot histogram = 2 x per-slot");
-    println!("          (one for the slot, one for the aggregate).");
+    println!("  Memory: buckets x 8 bytes (single-slot histogram).");
     println!();
     println!("  Error:  |exact - estimated| / exact x 100%.");
     println!();
@@ -306,13 +304,8 @@ fn main() {
     }
     println!();
 
-    // Memory rows
-    print!("  {:<label_w$}", "Mem/slot");
-    for r in &results {
-        print!(" {:>col_w$}", format_bytes(r.memory_bytes / 2));
-    }
-    println!();
-    print!("  {:<label_w$}", "Mem total");
+    // Memory row
+    print!("  {:<label_w$}", "Memory");
     for r in &results {
         print!(" {:>col_w$}", format_bytes(r.memory_bytes));
     }
