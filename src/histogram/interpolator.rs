@@ -88,10 +88,10 @@ impl<'a> Interpolator<'a> {
         k
     }
 
-    /// Computes the estimated sample count in `[bucket.left(), bucket.left() + x)`
+    /// Computes the estimated sample count in `[bucket.left(), bucket.left() + rel_position)`
     /// using trapezoidal density estimation.
     ///
-    /// `x` is the offset from the bucket's left boundary.
+    /// `rel_position` is the offset from the bucket's left boundary.
     /// Since the underlying density is continuous, the boundary is
     /// effectively neither open nor closed (a single point has zero measure).
     ///
@@ -110,10 +110,10 @@ impl<'a> Interpolator<'a> {
     /// ```text
     ///   C(x) = a·x + k·x²/2
     /// ```
-    pub fn trapezoidal_cdf(&self, bucket: usize, x: u64) -> f64 {
+    pub fn trapezoidal_cdf(&self, bucket: usize, rel_position: u64) -> f64 {
         let b = self.bucket(bucket);
         let w = b.width() as f64;
-        let x = x as f64;
+        let x = rel_position as f64;
 
         let d1 = b.count() as f64 / w;
         let k = self.clamped_density_slope(bucket);
@@ -123,6 +123,51 @@ impl<'a> Interpolator<'a> {
         let b = d1 + k * w / 2.0; // Density at right edge, for debugging
         println!("bucket {bucket}: width={w} d1={d1}, k={k}, a={a} b={b}");
         a * x + k * x * x / 2.0
+    }
+
+    /// Returns the smallest absolute position within a bucket that
+    /// corresponds to the given rank, using trapezoidal density interpolation.
+    ///
+    /// `rank` is the 1-based rank within this bucket (1..=count).
+    ///
+    /// The result is clamped to `[left, right]`.
+    /// Returns the bucket midpoint when `count <= 1` or `width == 1`.
+    ///
+    /// Solves for offset `x` from the bucket's left edge via:
+    ///
+    /// ```text
+    ///   a = count/w − k·w/2        (density at left edge)
+    ///   Solve a·x + k·x²/2 = rank:
+    ///     x = (−a + √(a² + 2·k·rank)) / k
+    /// ```
+    ///
+    /// Then maps to absolute position: `left + floor(x)`.
+    pub fn rank_to_position(&self, bucket: usize, rank: u64) -> u64 {
+        let b = self.bucket(bucket);
+        let count = b.count();
+
+        if count <= 1 || b.width() == 1 {
+            return b.midpoint();
+        }
+
+        let rank = rank as f64;
+        let w = b.width() as f64;
+        let d1 = count as f64 / w;
+        let k = self.clamped_density_slope(bucket);
+
+        // Density at left edge
+        let a = d1 - k * w / 2.0;
+
+        // Solve a·x + k·x²/2 = rank for x
+        let x = if (k * w).abs() < d1.abs() * 1e-9 {
+            // Near-uniform density
+            rank / d1
+        } else {
+            let disc = a * a + 2.0 * k * rank;
+            if disc < 0.0 { rank / d1 } else { (-a + disc.sqrt()) / k }
+        };
+
+        b.left() + x.clamp(0.0, w) as u64
     }
 
     /// Returns the estimated count of samples in `[0, position)`,
@@ -493,6 +538,115 @@ mod tests {
 
         let c = cdf(r, 12, 2);
         assert!((c - 50.0).abs() < 1e-10);
+    }
+
+    // === rank_to_position tests ===
+
+    fn pos(records: &[(u64, u64)], bucket: usize, rank: u64) -> u64 {
+        let h = make_hist(records);
+        h.interpolator().rank_to_position(bucket, rank)
+    }
+
+    #[test]
+    fn test_rank_to_position_single_sample() {
+        // count=1 → returns midpoint
+        // Bucket 9: [10,12) midpoint=11
+        let r = &[(10, 1)];
+        assert_eq!(pos(r, 9, 1), 11);
+    }
+
+    #[test]
+    fn test_rank_to_position_width_one() {
+        // Bucket 5: [5,6) width=1 → returns midpoint=5
+        let r = &[(5, 10)];
+        assert_eq!(pos(r, 5, 5), 5);
+    }
+
+    #[test]
+    fn test_rank_to_position_uniform() {
+        // Equal neighbors → uniform interpolation
+        // Bucket 9: [10,12) width=2, count=20
+        // rank 10 / count 20 = 0.5 → t=0.5 → left + floor(2 * 0.5) = 10 + 1 = 11
+        let r = &[(8, 20), (10, 20), (12, 20)];
+        assert_eq!(pos(r, 9, 10), 11);
+
+        // rank 1 / 20 = 0.05 → t=0.05 → 10 + floor(2*0.05) = 10
+        assert_eq!(pos(r, 9, 1), 10);
+
+        // rank 20 / 20 = 1.0 → x=w → left + w = right = 12
+        assert_eq!(pos(r, 9, 20), 12);
+    }
+
+    #[test]
+    fn test_rank_to_position_increasing_density() {
+        // Increasing density: mass shifts right → position > midpoint for median rank
+        // Bucket 9: [10,12) width=2, count=20
+        let r = &[(8, 10), (10, 20), (12, 30)];
+        let mid_pos = pos(r, 9, 10);
+        assert!(mid_pos >= 10);
+        assert!(
+            mid_pos > 10,
+            "increasing density: pos={mid_pos} should be > midpoint 10"
+        );
+    }
+
+    #[test]
+    fn test_rank_to_position_decreasing_density() {
+        // Decreasing density: mass shifts left → position < midpoint for median rank
+        // Bucket 9: [10,12) width=2, count=20
+        let r = &[(8, 30), (10, 20), (12, 10)];
+        let mid_pos = pos(r, 9, 10);
+        assert!(mid_pos >= 10);
+        assert!(mid_pos < 11, "decreasing density: pos={mid_pos} should be < 11");
+    }
+
+    #[test]
+    fn test_rank_to_position_monotonicity() {
+        // Position must be non-decreasing as rank increases
+        let r = &[(8, 10), (10, 20), (12, 30)];
+        let mut prev = 0;
+        for rank in 1..=20 {
+            let p = pos(r, 9, rank);
+            assert!(p >= prev, "rank {rank}: pos={p} < prev={prev}");
+            prev = p;
+        }
+    }
+
+    #[test]
+    fn test_rank_to_position_clamped_to_bucket() {
+        // Result must be in [left, right-1]
+        let r = &[(8, 10), (10, 20), (12, 30)];
+        let b_left = 10u64;
+        let b_right = 12u64;
+
+        for rank in 1..=20 {
+            let p = pos(r, 9, rank);
+            assert!(p >= b_left, "rank {rank}: pos={p} < left={b_left}");
+            assert!(p <= b_right, "rank {rank}: pos={p} > right={b_right}");
+        }
+    }
+
+    #[test]
+    fn test_rank_to_position_wider_bucket() {
+        // Bucket 12: [16,20) width=4, count=40
+        let r = &[(14, 20), (16, 40), (20, 60)];
+
+        // First rank → near left
+        let p = pos(r, 12, 1);
+        assert!(p >= 16);
+        assert!(p <= 17);
+
+        // Last rank → right = 20
+        let p = pos(r, 12, 40);
+        assert_eq!(p, 20);
+
+        // Monotonicity
+        let mut prev = 0;
+        for rank in 1..=40 {
+            let p = pos(r, 12, rank);
+            assert!(p >= prev, "rank {rank}: pos={p} < prev={prev}");
+            prev = p;
+        }
     }
 
     // === count_below tests ===
