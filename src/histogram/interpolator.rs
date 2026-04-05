@@ -65,6 +65,29 @@ impl<'a> Interpolator<'a> {
         (dr - dl) / (br.midpoint() as f64 - bl.midpoint() as f64)
     }
 
+    /// Returns the density slope at `bucket`, clamped so that the linear
+    /// density model `d(x) = d1 + k·(x - w/2)` stays non-negative across
+    /// the entire bucket width.
+    ///
+    /// This is `density_slope()` with the additional guarantee that the
+    /// resulting slope can be used directly for trapezoidal interpolation
+    /// without producing negative density at either edge.
+    pub fn clamped_density_slope(&self, bucket: usize) -> f64 {
+        let b = self.bucket(bucket);
+        let w = b.width() as f64;
+        let d1 = b.count() as f64 / w;
+        let mut k = self.density_slope(bucket);
+
+        if d1 + k * w / 2.0 < 0.0 {
+            k = -d1 / (w / 2.0);
+        }
+        if d1 - k * w / 2.0 < 0.0 {
+            k = d1 / (w / 2.0);
+        }
+
+        k
+    }
+
     /// Computes the estimated sample count in `[bucket.left(), bucket.left() + x)`
     /// using trapezoidal density estimation.
     ///
@@ -79,7 +102,7 @@ impl<'a> Interpolator<'a> {
     /// ```
     ///
     /// where `a = d1 - k·width/2` is the density at the left edge,
-    /// `k` is the density slope from `density_slope()`,
+    /// `k` is the clamped density slope from `clamped_density_slope()`,
     /// and `d1 = count / width` is the average density.
     ///
     /// The CDF is:
@@ -93,15 +116,7 @@ impl<'a> Interpolator<'a> {
         let x = x as f64;
 
         let d1 = b.count() as f64 / w;
-        let mut k = self.density_slope(bucket);
-
-        if d1 + k * w / 2.0 < 0.0 {
-            // Density at right edge would be negative → adjust slope
-            k = -d1 / (w / 2.0);
-        }
-        if d1 - k * w / 2.0 < 0.0 {
-            k = d1 / (w / 2.0); // Adjust slope to maintain average density
-        }
+        let k = self.clamped_density_slope(bucket);
 
         // d(x) = a + k·x, where a = d1 - k·w/2 is density at left edge
         let a = d1 - k * w / 2.0;
@@ -231,6 +246,92 @@ mod tests {
         // Both neighbors empty → k=0
         let k = slope(&[(10, 50)], 9);
         assert!(k.abs() < 1e-10);
+    }
+
+    // === clamped_density_slope tests ===
+
+    fn clamped_slope(records: &[(u64, u64)], bucket: usize) -> f64 {
+        let h = make_hist(records);
+        h.interpolator().clamped_density_slope(bucket)
+    }
+
+    #[test]
+    fn test_clamped_slope_passes_through_when_no_clamping_needed() {
+        // Moderate slope: bucket 9 [10,12) w=2, d1=10
+        // k=2.5, edge densities: d1-k*w/2=7.5, d1+k*w/2=12.5 — both positive
+        let r = &[(8, 10), (10, 20), (12, 30)];
+        assert!((clamped_slope(r, 9) - slope(r, 9)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_clamped_slope_clamps_negative_right_edge() {
+        // Bucket 9: [10,12) w=2, count=2 → d1=1
+        // Steep negative slope from neighbors: left has much more than right
+        // Raw k would make d1 + k*w/2 < 0 (right edge negative)
+        // Clamped: k = -d1 / (w/2) = -1/1 = -1
+        let r = &[(8, 100), (10, 2), (12, 0)];
+        let raw = slope(r, 9);
+        let clamped = clamped_slope(r, 9);
+
+        // Raw slope is very negative
+        assert!(raw < -1.0);
+        // Clamped to -d1/(w/2) = -1.0
+        assert!((clamped - (-1.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_clamped_slope_clamps_negative_left_edge() {
+        // Bucket 9: [10,12) w=2, count=2 → d1=1
+        // Steep positive slope: right has much more than left
+        // Raw k would make d1 - k*w/2 < 0 (left edge negative)
+        // Clamped: k = d1 / (w/2) = 1/1 = 1
+        let r = &[(8, 0), (10, 2), (12, 100)];
+        let raw = slope(r, 9);
+        let clamped = clamped_slope(r, 9);
+
+        assert!(raw > 1.0);
+        assert!((clamped - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_clamped_slope_zero_count() {
+        // Empty bucket: d1=0, any slope is clamped to 0
+        let k = clamped_slope(&[], 9);
+        assert!(k.abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_clamped_slope_uniform_neighbors() {
+        // Equal neighbors → k=0 → no clamping
+        let r = &[(8, 20), (10, 20), (12, 20)];
+        assert!(clamped_slope(r, 9).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_clamped_slope_guarantees_nonnegative_density() {
+        // For any clamped slope, both edges must be >= 0:
+        //   left edge:  d1 - k*w/2 >= 0
+        //   right edge: d1 + k*w/2 >= 0
+        let test_cases: &[&[(u64, u64)]] = &[
+            &[(8, 100), (10, 2), (12, 0)],
+            &[(8, 0), (10, 2), (12, 100)],
+            &[(8, 1), (10, 1000), (12, 1)],
+            &[(8, 1000), (10, 1), (12, 1000)],
+        ];
+
+        for records in test_cases {
+            let h = make_hist(records);
+            let interp = h.interpolator();
+            let b = interp.bucket(9);
+            let w = b.width() as f64;
+            let d1 = b.count() as f64 / w;
+            let k = interp.clamped_density_slope(9);
+
+            let left_edge = d1 - k * w / 2.0;
+            let right_edge = d1 + k * w / 2.0;
+            assert!(left_edge >= -1e-10, "left edge {left_edge} < 0 for {records:?}");
+            assert!(right_edge >= -1e-10, "right edge {right_edge} < 0 for {records:?}");
+        }
     }
 
     // === trapezoidal_cdf tests ===
