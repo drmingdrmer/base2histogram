@@ -38,11 +38,11 @@ fn application_reports_precomputed_percentile_stats() {
         p50: 22,
         p90: 88,
         p99: 95,
-        p99_9: 95,
+        p99_9: 96,
     });
 
     assert_eq!(
         stats.to_string(),
-        "[samples: 100, P0.1: 5, P1: 5, P5: 5, P10: 5, P50: 22, P90: 88, P99: 95, P99.9: 95]"
+        "[samples: 100, P0.1: 5, P1: 5, P5: 5, P10: 5, P50: 22, P90: 88, P99: 95, P99.9: 96]"
     );
 }

@@ -222,19 +222,14 @@ impl<T> Histogram<T> {
     /// Returns the interpolated value at the given rank (1-based position in
     /// sorted order).
     fn value_at_rank(&self, rank: u64) -> u64 {
+        let interp = self.interpolator();
         let mut cumulative = 0u64;
 
-        for (bucket_index, &count) in self.aggregate_buckets.iter().enumerate() {
-            let prev_cumulative = cumulative;
+        for (i, &count) in self.aggregate_buckets.iter().enumerate() {
             cumulative += count;
             if cumulative >= rank {
-                let prev_count = if bucket_index > 0 {
-                    self.aggregate_buckets[bucket_index - 1]
-                } else {
-                    0
-                };
-                let next_count = self.aggregate_buckets.get(bucket_index + 1).copied().unwrap_or(0);
-                return self.log_scale.interpolate(bucket_index, rank - prev_cumulative, count, prev_count, next_count);
+                let rank_in_bucket = rank - (cumulative - count);
+                return interp.rank_to_position(i, rank_in_bucket);
             }
         }
 
@@ -475,10 +470,10 @@ mod tests {
         // (both neighbors are empty, so t = f = rank_in_bucket / count):
         //   rank 11: f=1/3, 96 + floor(16 * 1/3) = 96 + 5  = 101
         //   rank 12: f=2/3, 96 + floor(16 * 2/3) = 96 + 10 = 106
-        //   rank 13: f=3/3, 96 + 16 = 112, clamped to right-1 = 111
+        //   rank 13: f=3/3, 96 + 16 = 112
         assert_eq!(hist.value_at_rank(11), 101);
         assert_eq!(hist.value_at_rank(12), 106);
-        assert_eq!(hist.value_at_rank(13), 111);
+        assert_eq!(hist.value_at_rank(13), 112);
 
         // Rank beyond total returns 0
         assert_eq!(hist.value_at_rank(14), 0);
@@ -952,17 +947,17 @@ mod tests {
                 (16, 11),
                 (21, 97),
                 (26, 101),
-                (31, 107),
+                (31, 108),
                 (36, 113),
                 (41, 117),
-                (46, 123),
+                (46, 124),
                 (51, 774),
-                (56, 799),
+                (56, 800),
                 (61, 822),
                 (66, 847),
                 (71, 874),
                 (76, 901),
-                (81, 927),
+                (81, 928),
                 (86, 950),
                 (91, 975),
                 (96, 1001),

@@ -123,7 +123,7 @@ mod tests {
             "    range | count",
             "[ 5,   6) | ████████████████████ 10",
             "[96, 112) | ██████ 3",
-            "total: 13  P50: 5  P90: 106  P99: 111",
+            "total: 13  P50: 5  P90: 106  P99: 112",
         ]
         .join("\n");
         assert_eq!(chart.detailed().to_string(), expect);
@@ -143,7 +143,7 @@ mod tests {
             "[ 5,   6) | █████████████▒▒▒▒▒▒▒  10 + 5",
             "[96, 112) | ▒▒▒▒  0 + 3",
             "█ a  total: 10  P50: 5  P90: 5  P99: 5",
-            "▒ b  total: 8  P50: 5  P90: 111  P99: 111",
+            "▒ b  total: 8  P50: 5  P90: 112  P99: 112",
         ]
         .join("\n");
         assert_eq!(chart.detailed().to_string(), expect);

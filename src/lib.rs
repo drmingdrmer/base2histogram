@@ -26,7 +26,7 @@
 //!
 //! assert_eq!(hist.total(), 6);
 //! assert_eq!(hist.percentile(0.50), 13);
-//! assert_eq!(hist.percentile(0.99), 23);
+//! assert_eq!(hist.percentile(0.99), 24);
 //! ```
 //!
 //! Sliding-window style aggregation with slots:
