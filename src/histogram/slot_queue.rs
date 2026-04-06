@@ -2,18 +2,14 @@ use std::collections::VecDeque;
 
 use super::slot::Slot;
 
-/// A container for historical slots with an implicit current period.
+/// A container for historical slots.
 ///
 /// Stores up to `slot_limit - 1` historical slots. The current period's
-/// bucket counts are not stored — they are derived from
-/// `aggregate_buckets - Σ stored_slots` in `Histogram`.
-///
-/// The `current_data` field holds metadata for the implicit current period.
+/// bucket counts and metadata are stored in `Histogram::aggregate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SlotQueue<T> {
     pub(crate) slot_limit: usize,
     pub(crate) slots: VecDeque<Slot<T>>,
-    pub(crate) current_data: Option<T>,
 }
 
 impl<T> SlotQueue<T> {
@@ -21,7 +17,6 @@ impl<T> SlotQueue<T> {
         Self {
             slot_limit,
             slots: VecDeque::with_capacity(slot_limit.saturating_sub(1)),
-            current_data: None,
         }
     }
 

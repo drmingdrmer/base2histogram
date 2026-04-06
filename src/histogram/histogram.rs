@@ -99,11 +99,12 @@ pub struct Histogram<T = ()> {
 
     /// Historical slots (up to `slot_limit - 1`).
     /// The current period is implicit: its buckets are
-    /// `aggregate_buckets - Σ stored slots`.
+    /// `aggregate.buckets - Σ stored slots`.
     slots: SlotQueue<T>,
 
     /// Aggregate bucket counts across all periods.
-    aggregate_buckets: Vec<u64>,
+    /// `.data` holds the current period's metadata.
+    aggregate: Slot<T>,
 
     /// Total number of samples across all periods.
     total: u64,
@@ -142,7 +143,10 @@ impl<T> Histogram<T> {
         Self {
             log_scale,
             slots: SlotQueue::new(slot_limit),
-            aggregate_buckets: vec![0; num_buckets],
+            aggregate: Slot {
+                buckets: vec![0; num_buckets],
+                data: None,
+            },
             total: 0,
         }
     }
@@ -155,7 +159,7 @@ impl<T> Histogram<T> {
     /// Record a value `count` times.
     pub fn record_n(&mut self, value: u64, count: u64) {
         let bucket_index = self.log_scale.calculate_bucket(value);
-        self.aggregate_buckets[bucket_index] += count;
+        self.aggregate.buckets[bucket_index] += count;
         self.total += count;
     }
 
@@ -173,7 +177,7 @@ impl<T> Histogram<T> {
     /// rotation algorithm.
     pub fn advance(&mut self, data: T) -> Option<T> {
         if self.slots.slot_limit <= 1 {
-            self.aggregate_buckets.fill(0);
+            self.aggregate.buckets.fill(0);
             self.total = 0;
             return None;
         }
@@ -188,7 +192,7 @@ impl<T> Histogram<T> {
             let evicted_total: u64 = evicted.buckets.iter().sum();
             self.total -= evicted_total;
             (0..num_buckets).for_each(|i| {
-                self.aggregate_buckets[i] -= evicted.buckets[i];
+                self.aggregate.buckets[i] -= evicted.buckets[i];
             });
             (evicted.buckets, evicted.data)
         } else {
@@ -196,20 +200,20 @@ impl<T> Histogram<T> {
         };
 
         // Materialize current: aggregate - Σ stored
-        buckets.copy_from_slice(&self.aggregate_buckets);
+        buckets.copy_from_slice(&self.aggregate.buckets);
         for slot in self.slots.iter_all() {
             (0..num_buckets).for_each(|i| {
                 buckets[i] -= slot.buckets[i];
             });
         }
 
-        let current_data = self.slots.current_data.take();
+        let current_data = self.aggregate.data.take();
         self.slots.push_back(Slot {
             buckets,
             data: current_data,
         });
 
-        self.slots.current_data = Some(data);
+        self.aggregate.data = Some(data);
         evicted_data
     }
 
@@ -231,12 +235,12 @@ impl<T> Histogram<T> {
 
     /// Sets the metadata for the current (implicit) slot, returning the old value.
     pub fn set_current_data(&mut self, data: T) -> Option<T> {
-        self.slots.current_data.replace(data)
+        self.aggregate.data.replace(data)
     }
 
     /// Returns a reference to the current slot's metadata.
     pub fn current_data(&self) -> Option<&T> {
-        self.slots.current_data.as_ref()
+        self.aggregate.data.as_ref()
     }
 
     /// Returns the bucket width parameter used by this histogram.
@@ -247,10 +251,10 @@ impl<T> Histogram<T> {
 
     /// Resets the histogram to empty, clearing all buckets and slots.
     pub fn clear(&mut self) {
-        self.aggregate_buckets.fill(0);
+        self.aggregate.buckets.fill(0);
+        self.aggregate.data = None;
         self.total = 0;
         self.slots.slots.clear();
-        self.slots.current_data = None;
     }
 
     /// Returns the total number of values recorded across all slots.
@@ -284,7 +288,7 @@ impl<T> Histogram<T> {
         let interp = self.interpolator();
         let mut cumulative = 0u64;
 
-        for (i, &count) in self.aggregate_buckets.iter().enumerate() {
+        for (i, &count) in self.aggregate.buckets.iter().enumerate() {
             cumulative += count;
             if cumulative >= rank {
                 let rank_in_bucket = rank - (cumulative - count);
@@ -304,7 +308,7 @@ impl<T> Histogram<T> {
 
     /// Returns an [`Interpolator`] over the aggregate bucket counts.
     pub fn interpolator(&self) -> Interpolator<'_> {
-        Interpolator::new(self.log_scale, &self.aggregate_buckets)
+        Interpolator::new(self.log_scale, &self.aggregate.buckets)
     }
 
     /// Returns common percentile statistics: samples, P0.1, P1, P5, P10, P50, P90, P99, P99.9.
@@ -338,7 +342,7 @@ impl<T> Histogram<T> {
     /// Returns an incremental cursor for computing cumulative counts
     /// at monotonically increasing positions.
     pub fn cumulative_count(&self) -> CumulativeCount<'_> {
-        CumulativeCount::new(self.log_scale, &self.aggregate_buckets)
+        CumulativeCount::new(self.log_scale, &self.aggregate.buckets)
     }
 
     /// Returns a lazy reference to the bucket at the given index.
@@ -347,7 +351,7 @@ impl<T> Histogram<T> {
     ///
     /// Panics if `index >= self.num_buckets()`.
     pub fn bucket(&self, index: usize) -> BucketRef<'_> {
-        BucketRef::new(self.log_scale, index, self.aggregate_buckets[index])
+        BucketRef::new(self.log_scale, index, self.aggregate.buckets[index])
     }
 
     /// Re-bins this histogram into a different log scale, preserving all slots.
@@ -360,7 +364,10 @@ impl<T> Histogram<T> {
     where T: Clone {
         let dst_scale = LogScale::get(width);
 
-        let aggregate_buckets = Self::rebin(self.log_scale, &self.aggregate_buckets, dst_scale);
+        let aggregate = Slot {
+            buckets: Self::rebin(self.log_scale, &self.aggregate.buckets, dst_scale),
+            data: self.aggregate.data.clone(),
+        };
 
         let mut slots = SlotQueue::new(self.slots.slot_limit);
         for src_slot in self.slots.iter_all() {
@@ -369,13 +376,12 @@ impl<T> Histogram<T> {
                 data: src_slot.data.clone(),
             });
         }
-        slots.current_data = self.slots.current_data.clone();
 
         Histogram {
             log_scale: dst_scale,
             slots,
+            aggregate,
             total: self.total,
-            aggregate_buckets,
         }
     }
 
@@ -440,10 +446,10 @@ mod tests {
         hist.record(100);
 
         assert_eq!(hist.total(), 4);
-        assert_eq!(hist.aggregate_buckets[1], 1);
-        assert_eq!(hist.aggregate_buckets[5], 1);
-        assert_eq!(hist.aggregate_buckets[scale().calculate_bucket(10)], 1);
-        assert_eq!(hist.aggregate_buckets[scale().calculate_bucket(100)], 1);
+        assert_eq!(hist.aggregate.buckets[1], 1);
+        assert_eq!(hist.aggregate.buckets[5], 1);
+        assert_eq!(hist.aggregate.buckets[scale().calculate_bucket(10)], 1);
+        assert_eq!(hist.aggregate.buckets[scale().calculate_bucket(100)], 1);
     }
 
     #[test]
@@ -455,7 +461,7 @@ mod tests {
         hist.record(8);
 
         assert_eq!(hist.total(), 3);
-        assert_eq!(hist.aggregate_buckets[8], 3);
+        assert_eq!(hist.aggregate.buckets[8], 3);
     }
 
     #[test]
@@ -466,8 +472,8 @@ mod tests {
         hist.record_n(100, 3);
 
         assert_eq!(hist.total(), 8);
-        assert_eq!(hist.aggregate_buckets[scale().calculate_bucket(10)], 5);
-        assert_eq!(hist.aggregate_buckets[scale().calculate_bucket(100)], 3);
+        assert_eq!(hist.aggregate.buckets[scale().calculate_bucket(10)], 5);
+        assert_eq!(hist.aggregate.buckets[scale().calculate_bucket(100)], 3);
     }
 
     #[test]
@@ -482,7 +488,7 @@ mod tests {
 
         assert_eq!(hist_n.total(), hist_single.total());
         let bucket = scale().calculate_bucket(42);
-        assert_eq!(hist_n.aggregate_buckets[bucket], hist_single.aggregate_buckets[bucket]);
+        assert_eq!(hist_n.aggregate.buckets[bucket], hist_single.aggregate.buckets[bucket]);
     }
 
     #[test]
@@ -495,7 +501,7 @@ mod tests {
         let mut hist: Histogram = Histogram::new();
         assert_eq!(hist.num_buckets(), 252);
         hist.record(u64::MAX);
-        assert_eq!(hist.aggregate_buckets[251], 1);
+        assert_eq!(hist.aggregate.buckets[251], 1);
         assert_eq!(hist.total(), 1);
     }
 
@@ -711,7 +717,7 @@ mod tests {
         hist.record(200);
         assert_eq!(hist.active_slot_count(), 2);
         assert_eq!(hist.total(), 2);
-        assert_eq!(hist.slots.current_data, Some(10));
+        assert_eq!(hist.aggregate.data, Some(10));
 
         // Advance adds new slot (now 3 slots), no eviction
         assert_eq!(hist.advance(20), None);
@@ -746,7 +752,7 @@ mod tests {
         // slot 2: was slot 3 (data=30)
         // slot 3: new slot (data=40)
         assert_eq!(hist.slots.slots.front().unwrap().data, Some(10));
-        assert_eq!(hist.slots.current_data, Some(40));
+        assert_eq!(hist.aggregate.data, Some(40));
     }
 
     #[test]
@@ -774,7 +780,7 @@ mod tests {
         // 2 stored historicals + 1 implicit current
         assert_eq!(hist.slots.slots.front().unwrap().data, Some(7));
         assert_eq!(hist.slots.slots.get(1).unwrap().data, Some(8));
-        assert_eq!(hist.slots.current_data, Some(9));
+        assert_eq!(hist.aggregate.data, Some(9));
     }
 
     #[test]
@@ -791,7 +797,7 @@ mod tests {
         hist.advance(2);
         assert_eq!(hist.active_slot_count(), 2);
         assert_eq!(hist.slots.slots.front().unwrap().data, Some(1));
-        assert_eq!(hist.slots.current_data, Some(2));
+        assert_eq!(hist.aggregate.data, Some(2));
     }
 
     #[test]
@@ -799,17 +805,17 @@ mod tests {
         let mut hist: Histogram<String> = Histogram::with_slots(3);
 
         // Initially no stored slots, current_data is None
-        assert_eq!(hist.slots.current_data, None);
+        assert_eq!(hist.aggregate.data, None);
 
         // Advance adds new slot with data
         hist.advance("first".to_string());
         assert_eq!(hist.active_slot_count(), 2);
-        assert_eq!(hist.slots.current_data, Some("first".to_string()));
+        assert_eq!(hist.aggregate.data, Some("first".to_string()));
 
         // Advance adds another slot with data
         hist.advance("second".to_string());
         assert_eq!(hist.active_slot_count(), 3);
-        assert_eq!(hist.slots.current_data, Some("second".to_string()));
+        assert_eq!(hist.aggregate.data, Some("second".to_string()));
     }
 
     #[test]
@@ -862,9 +868,9 @@ mod tests {
             for bucket_idx in 0..h.num_buckets() {
                 let hist_sum: u64 = h.slots.slots.iter().map(|s| s.buckets[bucket_idx]).sum();
                 assert!(
-                    h.aggregate_buckets[bucket_idx] >= hist_sum,
+                    h.aggregate.buckets[bucket_idx] >= hist_sum,
                     "aggregate[{bucket_idx}]={} < historical_sum={hist_sum}",
-                    h.aggregate_buckets[bucket_idx]
+                    h.aggregate.buckets[bucket_idx]
                 );
             }
         };
@@ -1093,7 +1099,7 @@ mod tests {
         // current  = "hot" period (implicit)
         assert_eq!(rescaled.slots.slots.front().unwrap().data, None);
         assert_eq!(rescaled.slots.slots.get(1).unwrap().data, Some("warm"));
-        assert_eq!(rescaled.slots.current_data, Some("hot"));
+        assert_eq!(rescaled.aggregate.data, Some("hot"));
 
         // Total preserved
         assert_eq!(rescaled.total(), 25);
