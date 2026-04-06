@@ -137,6 +137,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_default() {
+        let scale = LogScale::default();
+        assert_eq!(
+            scale.num_buckets(),
+            LogScale::get(LogScale::DEFAULT_WIDTH).num_buckets()
+        );
+    }
+
+    #[test]
     fn test_num_buckets() {
         assert_eq!(LogScale::get(3).num_buckets(), 252);
     }

@@ -20,7 +20,11 @@ doc:
 
 check: lint fmt-check test doc
 
+coverage:
+	cargo llvm-cov --html
+	@echo "Coverage report: target/llvm-cov/html/index.html"
+
 clean:
 	cargo clean
 
-.PHONY: all test fmt fmt-check lint doc check clean
+.PHONY: all test fmt fmt-check lint doc check coverage clean

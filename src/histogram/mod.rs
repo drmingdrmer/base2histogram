@@ -18,6 +18,7 @@ mod slot_queue;
 pub use ascii_chart::AsciiChart;
 pub use bucket_ref::BucketRef;
 pub use cumulative_count::CumulativeCount;
+pub use display_buckets::DisplayBuckets;
 pub use histogram::Histogram;
 pub use interpolator::Interpolator;
 pub use log_scale::LogScale;

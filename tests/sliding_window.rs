@@ -9,14 +9,14 @@ fn application_can_track_a_sliding_window() {
     assert_eq!(hist.active_slot_count(), 1);
     assert_eq!(hist.slot_limit(), 2);
 
-    assert_eq!(hist.advance("warm"), 2);
+    assert_eq!(hist.advance("warm"), None); // no eviction yet
     hist.record_n(100, 3);
     assert_eq!(hist.total(), 5);
 
     let p90 = hist.percentile(0.9);
     assert!((96..=112).contains(&p90), "p90 = {p90}");
 
-    assert_eq!(hist.advance("steady"), 2);
+    assert_eq!(hist.advance("steady"), None); // evicts initial slot (data=None)
     assert_eq!(hist.total(), 3);
 
     let p50 = hist.percentile(0.5);

@@ -87,6 +87,11 @@ use crate::histogram::display_buckets::DisplayBuckets;
 ///
 /// Fixed at 252 buckets * 8 bytes = 2,016 bytes per slot, covering the entire
 /// u64 range [0, 2^64-1].
+///
+/// # Type Parameter
+///
+/// `T` is optional per-slot metadata attached when calling [`advance()`](Histogram::advance).
+/// Use `()` (the default) if you don't need slot metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Histogram<T = ()> {
     /// Log scale for value-to-bucket mapping.
@@ -151,7 +156,8 @@ impl<T> Histogram<T> {
 
     /// Advances to a new slot, evicting the oldest if the slot limit is reached.
     ///
-    /// Returns the number of active slots after advancing.
+    /// Returns the evicted slot's metadata if a slot was evicted, or `None`
+    /// during warmup or on a single-slot histogram.
     ///
     /// Materializes the implicit current period into a stored historical slot,
     /// then starts a new empty current period with the given `data`.
@@ -160,10 +166,10 @@ impl<T> Histogram<T> {
     ///
     /// See [Slot Storage Layout](Histogram#slot-storage-layout) for the
     /// rotation algorithm.
-    pub fn advance(&mut self, data: T) -> usize {
+    pub fn advance(&mut self, data: T) -> Option<T> {
         if self.slots.slot_limit <= 1 {
             self.aggregate_buckets.fill(0);
-            return 0;
+            return None;
         }
 
         let num_buckets = self.log_scale.num_buckets();
@@ -171,14 +177,14 @@ impl<T> Histogram<T> {
         // Get a Vec for the materialized current period.
         // At capacity: evict oldest and reuse its allocation.
         // Warmup: allocate a new Vec.
-        let mut buckets = if self.slots.slots.len() == self.slots.slot_limit - 1 {
+        let (mut buckets, evicted_data) = if self.slots.slots.len() == self.slots.slot_limit - 1 {
             let evicted = self.slots.pop_front().unwrap();
             (0..num_buckets).for_each(|i| {
                 self.aggregate_buckets[i] -= evicted.buckets[i];
             });
-            evicted.buckets
+            (evicted.buckets, evicted.data)
         } else {
-            vec![0; num_buckets]
+            (vec![0; num_buckets], None)
         };
 
         // Materialize current: aggregate - Σ stored
@@ -196,7 +202,7 @@ impl<T> Histogram<T> {
         });
 
         self.slots.current_data = Some(data);
-        self.slots.slots.len() + 1
+        evicted_data
     }
 
     /// Returns the number of active slots (stored historicals + implicit current).
@@ -215,12 +221,38 @@ impl<T> Histogram<T> {
         self.slots.slot_limit
     }
 
+    /// Sets the metadata for the current (implicit) slot, returning the old value.
+    pub fn set_current_data(&mut self, data: T) -> Option<T> {
+        self.slots.current_data.replace(data)
+    }
+
+    /// Returns a reference to the current slot's metadata.
+    pub fn current_data(&self) -> Option<&T> {
+        self.slots.current_data.as_ref()
+    }
+
+    /// Returns the bucket width parameter used by this histogram.
+    #[inline]
+    pub fn width(&self) -> usize {
+        self.log_scale.config().width()
+    }
+
+    /// Resets the histogram to empty, clearing all buckets and slots.
+    pub fn clear(&mut self) {
+        self.aggregate_buckets.fill(0);
+        self.slots.slots.clear();
+        self.slots.current_data = None;
+    }
+
     /// Returns the total number of values recorded across all slots.
     pub fn total(&self) -> u64 {
         self.aggregate_buckets.iter().sum()
     }
 
     /// Calculates the value at the given percentile.
+    ///
+    /// `p` must be in `[0.0, 1.0]`. Values outside this range produce
+    /// unspecified results.
     ///
     /// Returns an interpolated estimate within the bucket containing the percentile.
     /// Uses neighboring bucket densities for trapezoidal interpolation, falling back
@@ -310,6 +342,10 @@ impl<T> Histogram<T> {
     }
 
     /// Returns a lazy reference to the bucket at the given index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= self.num_buckets()`.
     pub fn bucket(&self, index: usize) -> BucketRef<'_> {
         BucketRef::new(self.log_scale, index, self.aggregate_buckets[index])
     }
@@ -656,7 +692,7 @@ mod tests {
         // With slot_limit<=1, no slots exist; advance just clears aggregate
         hist.record(42);
         assert_eq!(hist.total(), 1);
-        assert_eq!(hist.advance(10), 0);
+        assert_eq!(hist.advance(10), None);
         assert_eq!(hist.active_slot_count(), 0);
         assert_eq!(hist.total(), 0);
     }
@@ -669,19 +705,19 @@ mod tests {
         assert_eq!(hist.active_slot_count(), 1);
         assert_eq!(hist.total(), 1);
 
-        // Advance adds new slot (now 2 slots)
-        assert_eq!(hist.advance(10), 2);
+        // Advance adds new slot (now 2 slots), no eviction
+        assert_eq!(hist.advance(10), None);
         hist.record(200);
         assert_eq!(hist.active_slot_count(), 2);
         assert_eq!(hist.total(), 2);
         assert_eq!(hist.slots.current_data, Some(10));
 
-        // Advance adds new slot (now 3 slots)
-        assert_eq!(hist.advance(20), 3);
+        // Advance adds new slot (now 3 slots), no eviction
+        assert_eq!(hist.advance(20), None);
         assert_eq!(hist.active_slot_count(), 3);
 
-        // Advance adds new slot (now 4 slots = full)
-        assert_eq!(hist.advance(30), 4);
+        // Advance adds new slot (now 4 slots = full), no eviction
+        assert_eq!(hist.advance(30), None);
         assert_eq!(hist.active_slot_count(), 4);
     }
 
@@ -698,8 +734,8 @@ mod tests {
         assert_eq!(hist.active_slot_count(), 4);
         assert_eq!(hist.total(), 2); // 100 in slot 0, 200 in slot 1
 
-        // Advance again - evicts oldest (slot with 100), adds new slot
-        assert_eq!(hist.advance(40), 4);
+        // Advance again - evicts oldest (initial slot, data=None), adds new slot
+        assert_eq!(hist.advance(40), None);
         assert_eq!(hist.active_slot_count(), 4);
         assert_eq!(hist.total(), 1); // Only 200 remains (in what is now slot 0)
 
@@ -1074,6 +1110,173 @@ mod tests {
         // Evicts slot 0 (total=8), so total drops by 8
         assert_eq!(rescaled.total(), prev_total - slot0_total);
         assert_eq!(rescaled.active_slot_count(), 3);
+    }
+
+    #[test]
+    fn test_with_log_scale() {
+        let hist = Histogram::<()>::with_log_scale(5, 3);
+        assert_eq!(hist.width(), 5);
+        assert_eq!(hist.slot_limit(), 3);
+        assert_eq!(hist.active_slot_count(), 1);
+        assert_eq!(hist.num_buckets(), LogScaleConfig::new(5).buckets());
+    }
+
+    #[test]
+    fn test_width() {
+        assert_eq!(Histogram::<()>::new().width(), 3);
+        assert_eq!(Histogram::<()>::with_log_scale(5, 1).width(), 5);
+        assert_eq!(Histogram::<()>::with_log_scale(1, 1).width(), 1);
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut hist = Histogram::<&str>::with_slots(3);
+        hist.record_n(100, 5);
+        hist.advance("a");
+        hist.record_n(200, 3);
+
+        assert_eq!(hist.total(), 8);
+        assert_eq!(hist.active_slot_count(), 2);
+
+        hist.clear();
+        assert_eq!(hist.total(), 0);
+        assert_eq!(hist.active_slot_count(), 1); // back to initial (1 implicit current)
+        assert_eq!(hist.current_data(), None);
+        assert_eq!(hist.percentile(0.5), 0);
+
+        // Can record again after clear
+        hist.record(42);
+        assert_eq!(hist.total(), 1);
+    }
+
+    #[test]
+    fn test_set_current_data_and_current_data() {
+        let mut hist = Histogram::<&str>::with_slots(3);
+
+        // Initially None
+        assert_eq!(hist.current_data(), None);
+
+        // Set data, returns old value
+        assert_eq!(hist.set_current_data("first"), None);
+        assert_eq!(hist.current_data(), Some(&"first"));
+
+        // Overwrite, returns previous
+        assert_eq!(hist.set_current_data("second"), Some("first"));
+        assert_eq!(hist.current_data(), Some(&"second"));
+
+        // Data survives into stored slot on advance
+        hist.advance("third");
+        assert_eq!(hist.current_data(), Some(&"third"));
+        // The stored slot has the old current_data
+        assert_eq!(hist.slots.slots.front().unwrap().data, Some("second"));
+    }
+
+    #[test]
+    fn test_advance_returns_evicted_data() {
+        let mut hist = Histogram::<&str>::with_slots(3);
+
+        // Warmup: no eviction
+        assert_eq!(hist.advance("a"), None);
+        assert_eq!(hist.advance("b"), None);
+        assert_eq!(hist.active_slot_count(), 3);
+
+        // At capacity: evicts initial slot (data=None)
+        assert_eq!(hist.advance("c"), None);
+
+        // Evicts slot with data="a"
+        assert_eq!(hist.advance("d"), Some("a"));
+
+        // Evicts slot with data="b"
+        assert_eq!(hist.advance("e"), Some("b"));
+    }
+
+    #[test]
+    fn test_num_buckets() {
+        let hist = Histogram::<()>::new();
+        assert_eq!(hist.num_buckets(), 252); // width=3 default
+        assert_eq!(hist.num_buckets(), LogScaleConfig::new(3).buckets());
+    }
+
+    #[test]
+    fn test_bucket() {
+        let mut hist = Histogram::<()>::new();
+        hist.record_n(10, 7);
+
+        let bucket_idx = LogScale::get(3).calculate_bucket(10);
+        let b = hist.bucket(bucket_idx);
+        assert_eq!(b.count(), 7);
+        assert_eq!(b.index(), bucket_idx);
+        assert!(b.left() <= 10 && 10 < b.right());
+    }
+
+    #[test]
+    fn test_bucket_data() {
+        let mut hist = Histogram::<()>::new();
+        hist.record_n(5, 3);
+        hist.record_n(100, 2);
+
+        let non_empty: Vec<_> = hist.bucket_data().filter(|b| b.count() > 0).collect();
+        assert_eq!(non_empty.len(), 2);
+        assert_eq!(non_empty[0].count(), 3);
+        assert_eq!(non_empty[1].count(), 2);
+
+        let total_from_buckets: u64 = hist.bucket_data().map(|b| b.count()).sum();
+        assert_eq!(total_from_buckets, hist.total());
+    }
+
+    #[test]
+    fn test_interpolator() {
+        let mut hist = Histogram::<()>::new();
+        hist.record_n(10, 5);
+
+        let interp = hist.interpolator();
+        assert_eq!(interp.num_buckets(), hist.num_buckets());
+
+        let bucket_idx = LogScale::get(3).calculate_bucket(10);
+        let b = interp.bucket(bucket_idx);
+        assert_eq!(b.count(), 5);
+    }
+
+    #[test]
+    fn test_bucket_span() {
+        let mut hist = Histogram::<()>::new();
+        hist.record_n(10, 5);
+
+        let bucket_idx = LogScale::get(3).calculate_bucket(10);
+        let b = hist.bucket(bucket_idx);
+        let span = b.span();
+        assert_eq!(span.index(), bucket_idx);
+        assert!(span.left() <= 10 && 10 < span.right());
+        assert_eq!(span.width(), span.right() - span.left());
+    }
+
+    #[test]
+    fn test_cumulative_count() {
+        let mut hist = Histogram::<()>::new();
+        hist.record_n(10, 5);
+        hist.record_n(100, 3);
+
+        let mut cursor = hist.cumulative_count();
+        assert_eq!(cursor.current_bucket(), 0);
+        assert_eq!(cursor.whole_bucket_accumulated(), 0);
+
+        assert_eq!(cursor.count_below(10) as u64, 0);
+        assert_eq!(cursor.count_below(100) as u64, 5);
+        assert!(cursor.current_bucket() > 0);
+        assert!(cursor.whole_bucket_accumulated() >= 5);
+
+        assert_eq!(cursor.count_below(1000) as u64, 8);
+    }
+
+    #[test]
+    fn test_display_buckets() {
+        let mut hist = Histogram::<()>::new();
+        let s = hist.display_buckets().to_string();
+        assert_eq!(s, "");
+
+        hist.record_n(5, 3);
+        let s = hist.display_buckets().to_string();
+        assert_eq!(s, "b5[5,6)=3");
     }
 
     test_histogram_width_edge_cases!(test_width_edge_1, 1);

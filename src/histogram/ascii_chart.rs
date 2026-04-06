@@ -192,4 +192,36 @@ mod tests {
         let chart = AsciiChart::new().add("test", hist.clone());
         assert_eq!(format!("{}", chart), chart.detailed().to_string());
     }
+
+    #[test]
+    fn test_default() {
+        let chart: AsciiChart = AsciiChart::default();
+        assert_eq!(chart.compact().to_string(), "");
+    }
+
+    #[test]
+    fn test_from_series() {
+        let mut h1 = Histogram::<()>::new();
+        h1.record_n(10, 5);
+        let mut h2 = Histogram::<()>::new();
+        h2.record_n(100, 3);
+
+        let chart = AsciiChart::from_series([("a", h1), ("b", h2)]);
+        let text = chart.detailed().to_string();
+        assert!(text.contains("a"), "should contain series name 'a'");
+        assert!(text.contains("b"), "should contain series name 'b'");
+    }
+
+    #[test]
+    fn test_multi_series_detailed() {
+        let mut h1 = Histogram::<()>::new();
+        h1.record_n(10, 5);
+        let mut h2 = Histogram::<()>::new();
+        h2.record_n(10, 3);
+
+        let chart = AsciiChart::new().add("fast", h1).add("slow", h2);
+        let text = chart.detailed().to_string();
+        assert!(text.contains("fast"), "{text}");
+        assert!(text.contains("slow"), "{text}");
+    }
 }
