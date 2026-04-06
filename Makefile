@@ -24,7 +24,7 @@ bench:
 	cargo run --release --bin bench
 
 coverage:
-	cargo llvm-cov --html
+	cargo llvm-cov --html --ignore-filename-regex 'bin/'
 	@echo "Coverage report: target/llvm-cov/html/index.html"
 
 clean:

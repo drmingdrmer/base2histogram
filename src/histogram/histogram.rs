@@ -143,10 +143,7 @@ impl<T> Histogram<T> {
         Self {
             log_scale,
             slots: SlotQueue::new(slot_limit),
-            aggregate: Slot {
-                buckets: vec![0; num_buckets],
-                data: None,
-            },
+            aggregate: Slot::new(num_buckets),
             total: 0,
         }
     }
@@ -159,7 +156,7 @@ impl<T> Histogram<T> {
     /// Record a value `count` times.
     pub fn record_n(&mut self, value: u64, count: u64) {
         let bucket_index = self.log_scale.calculate_bucket(value);
-        self.aggregate.buckets[bucket_index] += count;
+        self.aggregate.record_n(bucket_index, count);
         self.total += count;
     }
 
@@ -177,7 +174,7 @@ impl<T> Histogram<T> {
     /// rotation algorithm.
     pub fn advance(&mut self, data: T) -> Option<T> {
         if self.slots.slot_limit <= 1 {
-            self.aggregate.buckets.fill(0);
+            self.aggregate.clear();
             self.total = 0;
             return None;
         }
@@ -189,11 +186,8 @@ impl<T> Histogram<T> {
         // Warmup: allocate a new Vec.
         let (mut buckets, evicted_data) = if self.slots.slots.len() == self.slots.slot_limit - 1 {
             let evicted = self.slots.pop_front().unwrap();
-            let evicted_total: u64 = evicted.buckets.iter().sum();
-            self.total -= evicted_total;
-            (0..num_buckets).for_each(|i| {
-                self.aggregate.buckets[i] -= evicted.buckets[i];
-            });
+            self.total -= evicted.total();
+            self.aggregate.subtract(&evicted);
             (evicted.buckets, evicted.data)
         } else {
             (vec![0; num_buckets], None)
@@ -251,8 +245,7 @@ impl<T> Histogram<T> {
 
     /// Resets the histogram to empty, clearing all buckets and slots.
     pub fn clear(&mut self) {
-        self.aggregate.buckets.fill(0);
-        self.aggregate.data = None;
+        self.aggregate.clear();
         self.total = 0;
         self.slots.slots.clear();
     }
@@ -351,7 +344,7 @@ impl<T> Histogram<T> {
     ///
     /// Panics if `index >= self.num_buckets()`.
     pub fn bucket(&self, index: usize) -> BucketRef<'_> {
-        BucketRef::new(self.log_scale, index, self.aggregate.buckets[index])
+        BucketRef::new(self.log_scale, index, self.aggregate.count_at(index))
     }
 
     /// Re-bins this histogram into a different log scale, preserving all slots.
@@ -416,19 +409,6 @@ mod tests {
     }
 
     #[test]
-    fn test_slot_clear() {
-        let mut slot: Slot<String> = Slot::new(10);
-        slot.buckets[0] = 5;
-        slot.buckets[5] = 10;
-        slot.data = Some("test".to_string());
-
-        slot.clear();
-
-        assert!(slot.buckets.iter().all(|&c| c == 0));
-        assert_eq!(slot.data, None);
-    }
-
-    #[test]
     fn test_histogram_default() {
         let hist: Histogram = Histogram::default();
         assert_eq!(hist.slot_limit(), 1);
@@ -446,10 +426,10 @@ mod tests {
         hist.record(100);
 
         assert_eq!(hist.total(), 4);
-        assert_eq!(hist.aggregate.buckets[1], 1);
-        assert_eq!(hist.aggregate.buckets[5], 1);
-        assert_eq!(hist.aggregate.buckets[scale().calculate_bucket(10)], 1);
-        assert_eq!(hist.aggregate.buckets[scale().calculate_bucket(100)], 1);
+        assert_eq!(hist.aggregate.count_at(1), 1);
+        assert_eq!(hist.aggregate.count_at(5), 1);
+        assert_eq!(hist.aggregate.count_at(scale().calculate_bucket(10)), 1);
+        assert_eq!(hist.aggregate.count_at(scale().calculate_bucket(100)), 1);
     }
 
     #[test]
@@ -461,7 +441,7 @@ mod tests {
         hist.record(8);
 
         assert_eq!(hist.total(), 3);
-        assert_eq!(hist.aggregate.buckets[8], 3);
+        assert_eq!(hist.aggregate.count_at(8), 3);
     }
 
     #[test]
@@ -472,8 +452,8 @@ mod tests {
         hist.record_n(100, 3);
 
         assert_eq!(hist.total(), 8);
-        assert_eq!(hist.aggregate.buckets[scale().calculate_bucket(10)], 5);
-        assert_eq!(hist.aggregate.buckets[scale().calculate_bucket(100)], 3);
+        assert_eq!(hist.aggregate.count_at(scale().calculate_bucket(10)), 5);
+        assert_eq!(hist.aggregate.count_at(scale().calculate_bucket(100)), 3);
     }
 
     #[test]
@@ -488,7 +468,10 @@ mod tests {
 
         assert_eq!(hist_n.total(), hist_single.total());
         let bucket = scale().calculate_bucket(42);
-        assert_eq!(hist_n.aggregate.buckets[bucket], hist_single.aggregate.buckets[bucket]);
+        assert_eq!(
+            hist_n.aggregate.count_at(bucket),
+            hist_single.aggregate.count_at(bucket)
+        );
     }
 
     #[test]
@@ -501,7 +484,7 @@ mod tests {
         let mut hist: Histogram = Histogram::new();
         assert_eq!(hist.num_buckets(), 252);
         hist.record(u64::MAX);
-        assert_eq!(hist.aggregate.buckets[251], 1);
+        assert_eq!(hist.aggregate.count_at(251), 1);
         assert_eq!(hist.total(), 1);
     }
 
@@ -866,11 +849,11 @@ mod tests {
                 return;
             }
             for bucket_idx in 0..h.num_buckets() {
-                let hist_sum: u64 = h.slots.slots.iter().map(|s| s.buckets[bucket_idx]).sum();
+                let hist_sum: u64 = h.slots.slots.iter().map(|s| s.count_at(bucket_idx)).sum();
                 assert!(
-                    h.aggregate.buckets[bucket_idx] >= hist_sum,
+                    h.aggregate.count_at(bucket_idx) >= hist_sum,
                     "aggregate[{bucket_idx}]={} < historical_sum={hist_sum}",
-                    h.aggregate.buckets[bucket_idx]
+                    h.aggregate.count_at(bucket_idx)
                 );
             }
         };
@@ -1105,8 +1088,8 @@ mod tests {
         assert_eq!(rescaled.total(), 25);
 
         // Individual slot totals preserved
-        let slot0_total: u64 = rescaled.slots.slots.front().unwrap().buckets.iter().sum();
-        let slot1_total: u64 = rescaled.slots.slots.get(1).unwrap().buckets.iter().sum();
+        let slot0_total: u64 = rescaled.slots.slots.front().unwrap().total();
+        let slot1_total: u64 = rescaled.slots.slots.get(1).unwrap().total();
         assert_eq!(slot0_total, 8); // 5 + 3
         assert_eq!(slot1_total, 10); // 4 + 6
         // Implicit current total = aggregate - stored = 25 - 8 - 10 = 7
