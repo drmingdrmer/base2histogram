@@ -120,8 +120,6 @@ impl<'a> Interpolator<'a> {
 
         // d(x) = a + k·x, where a = d1 - k·w/2 is density at left edge
         let a = d1 - k * w / 2.0;
-        let b = d1 + k * w / 2.0; // Density at right edge, for debugging
-        println!("bucket {bucket}: width={w} d1={d1}, k={k}, a={a} b={b}");
         a * x + k * x * x / 2.0
     }
 
