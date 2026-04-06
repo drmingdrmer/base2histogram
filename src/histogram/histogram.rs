@@ -174,11 +174,12 @@ impl<T> Histogram<T> {
         }
 
         let num_buckets = self.log_scale.num_buckets();
+        let at_capacity = self.slots.slots.len() == self.slots.slot_limit - 1;
 
         // Get a Vec for the materialized current period.
         // At capacity: evict oldest and reuse its allocation.
         // Warmup: allocate a new Vec.
-        let (mut buckets, evicted_data) = if self.slots.slots.len() == self.slots.slot_limit - 1 {
+        let (buckets, evicted_data) = if at_capacity {
             let evicted = self.slots.pop_front().unwrap();
             self.aggregate.subtract(&evicted);
             (evicted.buckets, evicted.data)
@@ -187,18 +188,29 @@ impl<T> Histogram<T> {
         };
 
         // Materialize current: aggregate - Σ stored
-        buckets.copy_from_slice(&self.aggregate.buckets);
-        for slot in self.slots.iter_all() {
-            (0..num_buckets).for_each(|i| {
-                buckets[i] -= slot.buckets[i];
-            });
-        }
+        let current = self.materialize_current(buckets);
 
         let current_data = self.aggregate.data.take();
-        self.slots.push_back(Slot::from_buckets(buckets, current_data));
+        self.slots.push_back(Slot::from_buckets(current, current_data));
 
         self.aggregate.data = Some(data);
         evicted_data
+    }
+
+    /// Computes the implicit current period's bucket counts into `dst`.
+    ///
+    /// `dst` is overwritten with `aggregate - Σ stored_slots`.
+    fn materialize_current(&self, mut dst: Vec<u64>) -> Vec<u64> {
+        let num_buckets = self.log_scale.num_buckets();
+
+        dst.copy_from_slice(&self.aggregate.buckets);
+        for slot in self.slots.iter_all() {
+            (0..num_buckets).for_each(|i| {
+                dst[i] -= slot.buckets[i];
+            });
+        }
+
+        dst
     }
 
     /// Returns the number of active slots (stored historicals + implicit current).
@@ -261,7 +273,8 @@ impl<T> Histogram<T> {
             return 0;
         }
 
-        let rank = (total as f64 * p).ceil().max(1.0) as u64;
+        let fractional_rank = total as f64 * p;
+        let rank = fractional_rank.ceil().max(1.0) as u64;
         self.value_at_rank(rank)
     }
 
@@ -345,19 +358,16 @@ impl<T> Histogram<T> {
     /// to preserve the exact total.
     pub fn rescale(&self, width: usize) -> Histogram<T>
     where T: Clone {
+        let src_scale = self.log_scale;
         let dst_scale = LogScale::get(width);
 
-        let aggregate = Slot::from_buckets(
-            Self::rebin(self.log_scale, &self.aggregate.buckets, dst_scale),
-            self.aggregate.data.clone(),
-        );
+        let agg_buckets = Self::rebin(src_scale, &self.aggregate.buckets, dst_scale);
+        let aggregate = Slot::from_buckets(agg_buckets, self.aggregate.data.clone());
 
         let mut slots = SlotQueue::new(self.slots.slot_limit);
         for src_slot in self.slots.iter_all() {
-            slots.push_back(Slot::from_buckets(
-                Self::rebin(self.log_scale, &src_slot.buckets, dst_scale),
-                src_slot.data.clone(),
-            ));
+            let buckets = Self::rebin(src_scale, &src_slot.buckets, dst_scale);
+            slots.push_back(Slot::from_buckets(buckets, src_slot.data.clone()));
         }
 
         Histogram {
@@ -374,7 +384,9 @@ impl<T> Histogram<T> {
         let mut prev_cdf = 0u64;
 
         for (i, count) in dst.iter_mut().enumerate() {
-            let cdf_right = cursor.count_below(dst_scale.bucket_span(i).right()).round() as u64;
+            let right = dst_scale.bucket_span(i).right();
+            let cdf_right = cursor.count_below(right).round() as u64;
+
             *count = cdf_right - prev_cdf;
             prev_cdf = cdf_right;
         }
