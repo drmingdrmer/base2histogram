@@ -52,6 +52,29 @@ impl<T> Slot<T> {
         self.total -= other.total;
     }
 
+    /// Finds the bucket containing the given rank (1-based).
+    ///
+    /// Scans buckets from left to right, accumulating counts.
+    /// Returns `(bucket_index, cumulative_before)` for the first bucket
+    /// whose cumulative count reaches `rank`, where `cumulative_before`
+    /// is the total count of all buckets before this one.
+    ///
+    /// Returns `None` if `rank` exceeds the total sample count.
+    #[inline]
+    pub(crate) fn bucket_at_rank(&self, rank: u64) -> Option<(usize, u64)> {
+        let mut cumulative = 0u64;
+
+        for (i, &count) in self.buckets.iter().enumerate() {
+            cumulative += count;
+            if cumulative >= rank {
+                let cumulative_before = cumulative - count;
+                return Some((i, cumulative_before));
+            }
+        }
+
+        None
+    }
+
     /// Resets all bucket counts to zero and removes user data.
     pub(crate) fn clear(&mut self) {
         self.buckets.fill(0);
@@ -122,6 +145,40 @@ mod tests {
         a.subtract(&b);
         assert_eq!(a.buckets, vec![9, 18, 27, 36]);
         assert_eq!(a.total(), 90);
+    }
+
+    #[test]
+    fn test_bucket_at_rank() {
+        // buckets: [3, 0, 5, 2]  total=10
+        let mut slot: Slot<()> = Slot::new(4);
+        slot.record_n(0, 3);
+        slot.record_n(2, 5);
+        slot.record_n(3, 2);
+
+        // Returns (bucket_index, cumulative_before_bucket)
+
+        // Ranks 1-3 fall in bucket 0 (count=3), cumulative_before=0
+        assert_eq!(slot.bucket_at_rank(1), Some((0, 0)));
+        assert_eq!(slot.bucket_at_rank(3), Some((0, 0)));
+
+        // Bucket 1 is empty (count=0), skipped.
+        // Ranks 4-8 fall in bucket 2 (count=5), cumulative_before=3
+        assert_eq!(slot.bucket_at_rank(4), Some((2, 3)));
+        assert_eq!(slot.bucket_at_rank(8), Some((2, 3)));
+
+        // Ranks 9-10 fall in bucket 3 (count=2), cumulative_before=8
+        assert_eq!(slot.bucket_at_rank(9), Some((3, 8)));
+        assert_eq!(slot.bucket_at_rank(10), Some((3, 8)));
+
+        // Rank beyond total
+        assert_eq!(slot.bucket_at_rank(11), None);
+
+        // Rank 0 — cumulative_before=0
+        assert_eq!(slot.bucket_at_rank(0), Some((0, 0)));
+
+        // Empty slot
+        let empty: Slot<()> = Slot::new(4);
+        assert_eq!(empty.bucket_at_rank(1), None);
     }
 
     #[test]

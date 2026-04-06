@@ -281,18 +281,13 @@ impl<T> Histogram<T> {
     /// Returns the interpolated value at the given rank (1-based position in
     /// sorted order).
     fn value_at_rank(&self, rank: u64) -> u64 {
+        let Some((bucket, cumulative_before)) = self.aggregate.bucket_at_rank(rank) else {
+            return 0;
+        };
+
+        let rank_in_bucket = rank - cumulative_before;
         let interp = self.interpolator();
-        let mut cumulative = 0u64;
-
-        for (i, &count) in self.aggregate.buckets.iter().enumerate() {
-            cumulative += count;
-            if cumulative >= rank {
-                let rank_in_bucket = rank - (cumulative - count);
-                return interp.rank_to_position(i, rank_in_bucket);
-            }
-        }
-
-        0
+        interp.rank_to_position(bucket, rank_in_bucket)
     }
 
     /// Returns the estimated count of samples in `[0, position)`,
