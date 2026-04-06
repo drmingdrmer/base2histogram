@@ -317,16 +317,18 @@ For the latency distributions that matter most (LN-API, LN-DB), WIDTH=3 delivers
 The main struct. `T` is optional user metadata per slot. `WIDTH` is a compile-time const generic.
 
 ```rust
-pub struct Histogram<T = (), const WIDTH: usize = 3> {
-    log_scale: &'static LogScale<WIDTH>,
+pub struct Histogram<T = ()> {
+    log_scale: &'static LogScale,
     slots: SlotQueue<T>,
-    aggregate_buckets: Vec<u64>,
+    aggregate: Slot<T>,
+    total: u64,
 }
 ```
 
 - `log_scale`: shared reference to precomputed lookup tables
-- `slots`: circular buffer of time-window slots
-- `aggregate_buckets`: running sum of all slot buckets, maintained incrementally
+- `slots`: historical time-window slots (up to `slot_limit - 1`)
+- `aggregate`: running sum of all slot buckets (`.buckets`) and current period metadata (`.data`)
+- `total`: cached total sample count
 
 ### `LogScale<WIDTH>`
 
@@ -361,7 +363,7 @@ Lazy references to bucket geometry. `BucketSpan` provides `left()`, `right()`, `
 
 ## Sliding Window
 
-The histogram supports multiple slots for time-windowed aggregation. Each slot has independent bucket counts. The `aggregate_buckets` array is the sum of all active slots, maintained incrementally.
+The histogram supports multiple slots for time-windowed aggregation. Each slot has independent bucket counts. The `aggregate` field holds the running sum of all active slots, maintained incrementally.
 
 When `advance()` is called:
 1. If the slot queue is full, evict the oldest slot by subtracting its buckets from the aggregate — O(bucket_count)

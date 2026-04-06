@@ -133,7 +133,7 @@ Scans forward from bucket 0 to 251:
 
 ```rust
 let mut cumulative = 0u64;
-for (bucket_index, &count) in self.aggregate_buckets.iter().enumerate() {
+for (bucket_index, &count) in self.aggregate.buckets.iter().enumerate() {
     cumulative += count;
     if cumulative >= rank {
         return self.log_scale.interpolate(
