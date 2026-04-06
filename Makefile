@@ -20,6 +20,9 @@ doc:
 
 check: lint fmt-check test doc
 
+bench:
+	cargo run --release --bin bench
+
 coverage:
 	cargo llvm-cov --html
 	@echo "Coverage report: target/llvm-cov/html/index.html"
@@ -27,4 +30,4 @@ coverage:
 clean:
 	cargo clean
 
-.PHONY: all test fmt fmt-check lint doc check coverage clean
+.PHONY: all test fmt fmt-check lint doc check bench coverage clean
