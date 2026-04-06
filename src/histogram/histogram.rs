@@ -102,12 +102,9 @@ pub struct Histogram<T = ()> {
     /// `aggregate.buckets - Σ stored slots`.
     slots: SlotQueue<T>,
 
-    /// Aggregate bucket counts across all periods.
+    /// Aggregate bucket counts and total across all periods.
     /// `.data` holds the current period's metadata.
     aggregate: Slot<T>,
-
-    /// Total number of samples across all periods.
-    total: u64,
 }
 
 impl<T> Default for Histogram<T> {
@@ -144,7 +141,6 @@ impl<T> Histogram<T> {
             log_scale,
             slots: SlotQueue::new(slot_limit),
             aggregate: Slot::new(num_buckets),
-            total: 0,
         }
     }
 
@@ -157,7 +153,6 @@ impl<T> Histogram<T> {
     pub fn record_n(&mut self, value: u64, count: u64) {
         let bucket_index = self.log_scale.calculate_bucket(value);
         self.aggregate.record_n(bucket_index, count);
-        self.total += count;
     }
 
     /// Advances to a new slot, evicting the oldest if the slot limit is reached.
@@ -175,7 +170,6 @@ impl<T> Histogram<T> {
     pub fn advance(&mut self, data: T) -> Option<T> {
         if self.slots.slot_limit <= 1 {
             self.aggregate.clear();
-            self.total = 0;
             return None;
         }
 
@@ -186,7 +180,6 @@ impl<T> Histogram<T> {
         // Warmup: allocate a new Vec.
         let (mut buckets, evicted_data) = if self.slots.slots.len() == self.slots.slot_limit - 1 {
             let evicted = self.slots.pop_front().unwrap();
-            self.total -= evicted.total();
             self.aggregate.subtract(&evicted);
             (evicted.buckets, evicted.data)
         } else {
@@ -202,10 +195,7 @@ impl<T> Histogram<T> {
         }
 
         let current_data = self.aggregate.data.take();
-        self.slots.push_back(Slot {
-            buckets,
-            data: current_data,
-        });
+        self.slots.push_back(Slot::from_buckets(buckets, current_data));
 
         self.aggregate.data = Some(data);
         evicted_data
@@ -246,14 +236,13 @@ impl<T> Histogram<T> {
     /// Resets the histogram to empty, clearing all buckets and slots.
     pub fn clear(&mut self) {
         self.aggregate.clear();
-        self.total = 0;
         self.slots.slots.clear();
     }
 
     /// Returns the total number of values recorded across all slots.
     #[inline]
     pub fn total(&self) -> u64 {
-        self.total
+        self.aggregate.total()
     }
 
     /// Calculates the value at the given percentile.
@@ -267,11 +256,12 @@ impl<T> Histogram<T> {
     ///
     /// Returns `0` if the histogram is empty.
     pub fn percentile(&self, p: f64) -> u64 {
-        if self.total == 0 {
+        let total = self.aggregate.total();
+        if total == 0 {
             return 0;
         }
 
-        let rank = (self.total as f64 * p).ceil().max(1.0) as u64;
+        let rank = (total as f64 * p).ceil().max(1.0) as u64;
         self.value_at_rank(rank)
     }
 
@@ -307,7 +297,7 @@ impl<T> Histogram<T> {
     /// Returns common percentile statistics: samples, P0.1, P1, P5, P10, P50, P90, P99, P99.9.
     pub fn percentile_stats(&self) -> PercentileStats {
         PercentileStats {
-            samples: self.total,
+            samples: self.aggregate.total(),
             p0_1: self.percentile(0.001),
             p1: self.percentile(0.01),
             p5: self.percentile(0.05),
@@ -357,24 +347,23 @@ impl<T> Histogram<T> {
     where T: Clone {
         let dst_scale = LogScale::get(width);
 
-        let aggregate = Slot {
-            buckets: Self::rebin(self.log_scale, &self.aggregate.buckets, dst_scale),
-            data: self.aggregate.data.clone(),
-        };
+        let aggregate = Slot::from_buckets(
+            Self::rebin(self.log_scale, &self.aggregate.buckets, dst_scale),
+            self.aggregate.data.clone(),
+        );
 
         let mut slots = SlotQueue::new(self.slots.slot_limit);
         for src_slot in self.slots.iter_all() {
-            slots.push_back(Slot {
-                buckets: Self::rebin(self.log_scale, &src_slot.buckets, dst_scale),
-                data: src_slot.data.clone(),
-            });
+            slots.push_back(Slot::from_buckets(
+                Self::rebin(self.log_scale, &src_slot.buckets, dst_scale),
+                src_slot.data.clone(),
+            ));
         }
 
         Histogram {
             log_scale: dst_scale,
             slots,
             aggregate,
-            total: self.total,
         }
     }
 
