@@ -6,9 +6,9 @@ use std::time::Instant;
 use base2histogram::Histogram;
 
 const N: usize = 1_000_000;
-const WARMUP_ITERS: usize = 3;
-const MEASURE_ITERS: usize = 10;
-const PERCENTILE_ITERS: usize = 10_000;
+const WARMUP_ITERS: usize = 5;
+const MEASURE_ITERS: usize = 30;
+const PERCENTILE_ITERS: usize = 1_000_000;
 
 // ---------------------------------------------------------------------------
 // PRNG (same xorshift64 used by accuracy benchmarks — no external dep)
