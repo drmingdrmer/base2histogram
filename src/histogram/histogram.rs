@@ -104,6 +104,9 @@ pub struct Histogram<T = ()> {
 
     /// Aggregate bucket counts across all periods.
     aggregate_buckets: Vec<u64>,
+
+    /// Total number of samples across all periods.
+    total: u64,
 }
 
 impl<T> Default for Histogram<T> {
@@ -140,6 +143,7 @@ impl<T> Histogram<T> {
             log_scale,
             slots: SlotQueue::new(slot_limit),
             aggregate_buckets: vec![0; num_buckets],
+            total: 0,
         }
     }
 
@@ -152,6 +156,7 @@ impl<T> Histogram<T> {
     pub fn record_n(&mut self, value: u64, count: u64) {
         let bucket_index = self.log_scale.calculate_bucket(value);
         self.aggregate_buckets[bucket_index] += count;
+        self.total += count;
     }
 
     /// Advances to a new slot, evicting the oldest if the slot limit is reached.
@@ -169,6 +174,7 @@ impl<T> Histogram<T> {
     pub fn advance(&mut self, data: T) -> Option<T> {
         if self.slots.slot_limit <= 1 {
             self.aggregate_buckets.fill(0);
+            self.total = 0;
             return None;
         }
 
@@ -179,6 +185,8 @@ impl<T> Histogram<T> {
         // Warmup: allocate a new Vec.
         let (mut buckets, evicted_data) = if self.slots.slots.len() == self.slots.slot_limit - 1 {
             let evicted = self.slots.pop_front().unwrap();
+            let evicted_total: u64 = evicted.buckets.iter().sum();
+            self.total -= evicted_total;
             (0..num_buckets).for_each(|i| {
                 self.aggregate_buckets[i] -= evicted.buckets[i];
             });
@@ -240,13 +248,15 @@ impl<T> Histogram<T> {
     /// Resets the histogram to empty, clearing all buckets and slots.
     pub fn clear(&mut self) {
         self.aggregate_buckets.fill(0);
+        self.total = 0;
         self.slots.slots.clear();
         self.slots.current_data = None;
     }
 
     /// Returns the total number of values recorded across all slots.
+    #[inline]
     pub fn total(&self) -> u64 {
-        self.aggregate_buckets.iter().sum()
+        self.total
     }
 
     /// Calculates the value at the given percentile.
@@ -260,20 +270,11 @@ impl<T> Histogram<T> {
     ///
     /// Returns `0` if the histogram is empty.
     pub fn percentile(&self, p: f64) -> u64 {
-        let total = self.total();
-        self.percentile_with_total(p, total)
-    }
-
-    /// Calculates the percentile given a specific total count.
-    ///
-    /// This is used internally when calculating multiple percentiles to avoid
-    /// recalculating the total multiple times.
-    fn percentile_with_total(&self, p: f64, total: u64) -> u64 {
-        if total == 0 {
+        if self.total == 0 {
             return 0;
         }
 
-        let rank = (total as f64 * p).ceil().max(1.0) as u64;
+        let rank = (self.total as f64 * p).ceil().max(1.0) as u64;
         self.value_at_rank(rank)
     }
 
@@ -308,17 +309,16 @@ impl<T> Histogram<T> {
 
     /// Returns common percentile statistics: samples, P0.1, P1, P5, P10, P50, P90, P99, P99.9.
     pub fn percentile_stats(&self) -> PercentileStats {
-        let samples = self.total();
         PercentileStats {
-            samples,
-            p0_1: self.percentile_with_total(0.001, samples),
-            p1: self.percentile_with_total(0.01, samples),
-            p5: self.percentile_with_total(0.05, samples),
-            p10: self.percentile_with_total(0.10, samples),
-            p50: self.percentile_with_total(0.50, samples),
-            p90: self.percentile_with_total(0.90, samples),
-            p99: self.percentile_with_total(0.99, samples),
-            p99_9: self.percentile_with_total(0.999, samples),
+            samples: self.total,
+            p0_1: self.percentile(0.001),
+            p1: self.percentile(0.01),
+            p5: self.percentile(0.05),
+            p10: self.percentile(0.10),
+            p50: self.percentile(0.50),
+            p90: self.percentile(0.90),
+            p99: self.percentile(0.99),
+            p99_9: self.percentile(0.999),
         }
     }
 
@@ -374,6 +374,7 @@ impl<T> Histogram<T> {
         Histogram {
             log_scale: dst_scale,
             slots,
+            total: self.total,
             aggregate_buckets,
         }
     }
@@ -766,6 +767,9 @@ mod tests {
             assert_eq!(hist.active_slot_count(), 3);
         }
 
+        // No values recorded, so total stays 0 through all evictions
+        assert_eq!(hist.total(), 0);
+
         // Verify oldest slots were evicted - only last 3 data values remain
         // 2 stored historicals + 1 implicit current
         assert_eq!(hist.slots.slots.front().unwrap().data, Some(7));
@@ -1118,6 +1122,7 @@ mod tests {
         assert_eq!(hist.width(), 5);
         assert_eq!(hist.slot_limit(), 3);
         assert_eq!(hist.active_slot_count(), 1);
+        assert_eq!(hist.total(), 0);
         assert_eq!(hist.num_buckets(), LogScaleConfig::new(5).buckets());
     }
 
@@ -1175,19 +1180,30 @@ mod tests {
     fn test_advance_returns_evicted_data() {
         let mut hist = Histogram::<&str>::with_slots(3);
 
+        hist.record_n(10, 5); // 5 in initial slot
+        assert_eq!(hist.total(), 5);
+
         // Warmup: no eviction
         assert_eq!(hist.advance("a"), None);
+        hist.record_n(20, 3); // 3 in slot "a"
+        assert_eq!(hist.total(), 8);
+
         assert_eq!(hist.advance("b"), None);
+        hist.record_n(30, 2); // 2 in slot "b"
+        assert_eq!(hist.total(), 10);
         assert_eq!(hist.active_slot_count(), 3);
 
-        // At capacity: evicts initial slot (data=None)
+        // At capacity: evicts initial slot (5 samples, data=None)
         assert_eq!(hist.advance("c"), None);
+        assert_eq!(hist.total(), 5); // 10 - 5
 
-        // Evicts slot with data="a"
+        // Evicts slot "a" (3 samples)
         assert_eq!(hist.advance("d"), Some("a"));
+        assert_eq!(hist.total(), 2); // 5 - 3
 
-        // Evicts slot with data="b"
+        // Evicts slot "b" (2 samples)
         assert_eq!(hist.advance("e"), Some("b"));
+        assert_eq!(hist.total(), 0); // 2 - 2
     }
 
     #[test]
