@@ -3,7 +3,7 @@
 Comparison of [base2histogram](https://github.com/drmingdrmer/base2histogram) ([intro](https://blog.openacid.com/algo/histogram/), Rust) and [DDSketch](https://github.com/DataDog/sketches-go) ([paper](http://www.vldb.org/pvldb/vol12/p2195-masson.pdf), Go).
 
 Versions compared:
-- base2histogram v0.1.5 ([`08eb806`](https://github.com/drmingdrmer/base2histogram/commit/08eb806), 2026-04-03)
+- base2histogram v0.2.2 ([`9b3d181`](https://github.com/drmingdrmer/base2histogram/commit/9b3d181), 2026-04-05)
 - DDSketch (sketches-go) [`36e98e0`](https://github.com/DataDog/sketches-go/commit/36e98e05d756ccb225b94882831c1443fb4ed535)
 
 ## DDSketch Algorithm
@@ -35,7 +35,7 @@ Both histograms use logarithmic bucketing for O(1) recording and O(buckets) perc
 | Formal error guarantee | DDSketch (configurable α) |
 | Practical percentile accuracy | base2histogram (trapezoidal interpolation) |
 | Precision configurability | DDSketch (continuous α at runtime) |
-| Memory predictability | base2histogram (fixed at compile time) |
+| Memory predictability | base2histogram (fixed at creation time) |
 | Recording hot-path speed | base2histogram (integer-only, no FP/log) |
 | Value type support | DDSketch (float64, negatives) |
 | Sliding window | base2histogram (built-in slot eviction) |
@@ -49,9 +49,9 @@ Both histograms use logarithmic bucketing for O(1) recording and O(buckets) perc
 | Language | Go | Rust |
 | Value type | `float64` (including negatives) | `u64` only |
 | Bucket mapping | `floor(log(v) / log(γ))` | `leading_zeros` + bit shift + offset |
-| Precision parameter | `α` (relative accuracy, 0 < α < 1) | `WIDTH` (1–6+), compile-time const |
+| Precision parameter | `α` (relative accuracy, 0 < α < 1) | `WIDTH` (1–16), runtime parameter |
 | Bucket count | Dynamic: `log(max/min) / log(γ)` | Fixed: `2^(WIDTH-1) · (66 - WIDTH)` |
-| Memory | Variable, depends on observed range | Fixed at compile time |
+| Memory | Variable, depends on observed range | Fixed at creation time (~2.1 KB per slot at WIDTH=3) |
 | Negative values | Yes (separate negative store) | No |
 | Zero handling | Dedicated `zeroCount` with threshold | Bucket 0 maps to value 0 |
 | Interpolation | None — returns bucket midpoint | Trapezoidal density estimation |
@@ -137,7 +137,7 @@ The `α` parameter provides a mathematically proven worst-case bound for **any**
 
 ### 2. Continuous precision control at runtime
 
-`α` is a continuous parameter — set `α=0.001` for 0.1% error, or `α=0.05` for less memory. Tunable at construction time. base2histogram's `WIDTH` is a compile-time const generic with power-of-2 error steps.
+`α` is a continuous parameter — set `α=0.001` for 0.1% error, or `α=0.05` for less memory. Tunable at construction time. base2histogram's `WIDTH` (1..=16) is set at construction time with power-of-2 error steps; shared `LogScale` instances are created once via `LazyLock`.
 
 ### 3. float64 and negative value support
 
@@ -201,7 +201,7 @@ Multi-slot architecture maintains per-slot bucket arrays plus a running aggregat
 
 ### 6. Compile-time optimization
 
-`WIDTH` is a const generic, so all derived constants (`GROUP_SIZE`, `MASK`, `BUCKETS`) are resolved at compile time. The compiler inlines and optimizes the entire bucket path. DDSketch's parameters are runtime values.
+`WIDTH` (1..=16) is set at construction time. `LogScale` instances are created once via `LazyLock` and shared as `&'static` references — all derived constants (group_size, mask, bucket boundaries) are computed once. DDSketch's `α` parameter is also runtime.
 
 ## Percentile Calculation
 
@@ -241,7 +241,7 @@ if cumulative >= rank {
 | Factor | DDSketch | base2histogram |
 |--------|----------|----------------|
 | Scan direction | Forward | Forward |
-| Scan bound | O(non-empty bins) | O(252) fixed at WIDTH=3 |
+| Scan bound | O(non-empty bins) | ~32 iterations (tiered region sums) |
 | Per-bucket scan cost | One float add | One integer add |
 | Result type | Geometric midpoint | Interpolated point value |
 | Interpolation | None | Trapezoidal (~10 FP ops, once) |
@@ -267,7 +267,7 @@ To match DDSketch's 1% worst-case guarantee, base2histogram needs WIDTH=8 (~58 K
 | Feature | DDSketch | base2histogram |
 |---------|----------|----------------|
 | Formal error guarantee | Yes (α) | No (bucket bound only) |
-| Runtime precision tuning | Yes | No (compile-time WIDTH) |
+| Runtime precision tuning | Yes (α) | Yes (WIDTH 1–16) |
 | float64 support | Yes | No (u64 only) |
 | Negative values | Yes | No |
 | Multiple mapping strategies | Yes (3 options) | No (integer-only) |
@@ -296,4 +296,4 @@ To match DDSketch's 1% worst-case guarantee, base2histogram needs WIDTH=8 (~58 K
 - You need deterministic fixed memory regardless of data range
 - You need maximum recording throughput (pure integer ops)
 - You need built-in sliding-window aggregation
-- You prefer compile-time memory guarantees with zero dynamic allocation
+- You prefer fixed memory guarantees with zero dynamic allocation after creation

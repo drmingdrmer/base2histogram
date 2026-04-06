@@ -86,7 +86,12 @@ mod tests {
         hist.record_n(100, 3);
 
         let chart = AsciiChart::new().add("test", hist.clone()).bar_width(20);
-        let expect = ["   [5,6)  ████████████████████ 10", "[96,112)  ██████ 3"].join("\n");
+        let expect = [
+            //
+            "   [5,6)  ████████████████████ 10",
+            "[96,112)  ██████ 3",
+        ]
+        .join("\n");
         assert_eq!(chart.compact().to_string(), expect);
     }
 

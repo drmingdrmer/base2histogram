@@ -3,7 +3,7 @@
 Comparison of [base2histogram](https://github.com/drmingdrmer/base2histogram) ([intro](https://blog.openacid.com/algo/histogram/), Rust) and [Heistogram](https://github.com/oldmoe/heistogram) ([intro](https://oldmoe.blog/2025/03/03/heistogram-nanosecond-quantile-queries-for-data-intensive-applications/), C).
 
 Versions compared:
-- base2histogram v0.1.5 ([`08eb806`](https://github.com/drmingdrmer/base2histogram/commit/08eb806), 2026-04-03)
+- base2histogram v0.2.2 ([`9b3d181`](https://github.com/drmingdrmer/base2histogram/commit/9b3d181), 2026-04-05)
 - Heistogram ([`bef475a`](https://github.com/oldmoe/heistogram/commit/bef475a), 2025-07-27)
 
 ## Heistogram Algorithm
@@ -44,7 +44,7 @@ The bucket array grows dynamically via `realloc` as larger values arrive — unl
 | Bucket mapping | `log2(v) * 35.0` with 2% growth factor | Base-2 log with configurable WIDTH (MSB + offset bits) |
 | Small values | Exact 1:1 for values 0–57 | Exact 1:1 for values 0–3 (WIDTH=3) |
 | Total buckets | Dynamic (grows via realloc) | Fixed 252 (WIDTH=3), covers full u64 |
-| Memory | Variable, grows with value range | Fixed ~2KB per slot |
+| Memory | Variable, grows with value range | Fixed ~2.1 KB per slot (counters + region sums) |
 | Interpolation | Linear within bucket | Trapezoidal density estimation using neighbor buckets |
 
 ## Heistogram Advantages
@@ -83,15 +83,15 @@ This produces better percentile estimates when the distribution is non-uniform w
 
 ### 2. Fixed, bounded memory
 
-252 buckets covering the entire u64 range, no dynamic allocation after creation. Heistogram grows via `realloc` as larger values arrive — unbounded in principle. base2histogram's fixed layout is predictable and cache-friendly.
+252 buckets covering the entire u64 range, no dynamic allocation after creation. Each slot adds a small region-sum cache (~128 bytes) for fast rank lookup but the total is still fixed at ~2.1 KB per slot. Heistogram grows via `realloc` as larger values arrive — unbounded in principle. base2histogram's fixed layout is predictable and cache-friendly.
 
 ### 3. Sliding window with slot-level eviction
 
 Multi-slot architecture with O(bucket_count) eviction of the oldest slot, maintaining running aggregates. Heistogram's `remove()` is per-value, which requires the caller to track individual values — much harder to use for time-windowed aggregation.
 
-### 4. Compile-time configurable resolution
+### 4. Runtime-configurable resolution
 
-The `const WIDTH` parameter trades bucket count for resolution at compile time. WIDTH=2 gives 128 buckets (less memory, more error); WIDTH=4 gives 504 buckets (more memory, less error). Heistogram's 2% growth factor is hardcoded.
+The `WIDTH` parameter (1..=16) trades bucket count for resolution. WIDTH=2 gives 128 buckets (less memory, more error); WIDTH=4 gives 504 buckets (more memory, less error). Shared `LogScale` instances are created once via `LazyLock`. Heistogram's 2% growth factor is hardcoded.
 
 ### 5. Precomputed lookup tables + small-value cache
 
@@ -127,52 +127,58 @@ Per-bucket cost in the hot path:
 
 Each non-empty bucket visited during the scan triggers a `fast_pow_int` call. For typical histograms with values in the 1K–1M range, bucket IDs reach ~400+, meaning `fast_pow_int(1.02, ~500)` does ~9 multiplies per bucket boundary computation.
 
-### base2histogram: `value_at_rank()`
+### base2histogram: `bucket_at_rank()` + `rank_to_position()`
 
-Scans forward from bucket 0 to 251:
+Uses a two-phase tiered scan via cached region sums (groups of 16 buckets):
 
 ```rust
-let mut cumulative = 0u64;
-for (bucket_index, &count) in self.aggregate.buckets.iter().enumerate() {
-    cumulative += count;
-    if cumulative >= rank {
-        return self.log_scale.interpolate(
-            bucket_index, rank - prev_cumulative, count, prev_count, next_count
-        );
-    }
-}
+// Phase 1: scan ~16 region sums to find the target region
+// Phase 2: scan ~16 buckets within that region
+let (bucket, cumulative_before) = slot.bucket_at_rank(rank)?;
+let rank_in_bucket = rank - cumulative_before;
+interp.rank_to_position(bucket, rank_in_bucket)
 ```
 
-Per-bucket cost:
-- One integer addition (`cumulative += count`) — no function calls, no floating point
+Per-region/bucket cost:
+- One integer addition + one comparison — no function calls, no floating point
 - Bucket boundary lookup is a precomputed table index: `self.bucket_min_values[i]`
 
-The interpolation (`trapezoidal_t`) involves ~10 floating-point operations (2 divisions, 1 sqrt, multiplies/adds), vs Heistogram's ~3 (one multiply, one subtract, one multiply). But interpolation runs only once — on the target bucket.
+The tiered scan reduces iterations from 252 to ~32 (16 regions + 16 buckets).
+The interpolation (`trapezoidal_cdf`) involves ~10 floating-point operations (2 divisions, 1 sqrt, multiplies/adds), vs Heistogram's ~3 (one multiply, one subtract, one multiply). But interpolation runs only once — on the target bucket.
 
 ### Scan Direction Asymmetry
 
-| Percentile | Heistogram (scans high→low) | base2histogram (scans low→high) |
-|------------|----------------------------|--------------------------------|
-| P99.9 | Fast (finds target near top) | Slow (must scan ~all 252 buckets) |
-| P99 | Fast | Slow-ish |
-| P50 | Slow (scans half the buckets) | Medium (scans ~half) |
-| P1 | Slow (scans almost all) | Fast (finds target near bottom) |
+Heistogram scans high→low; base2histogram scans low→high with a tiered
+region-sum acceleration layer. The tiered scan means direction matters
+less — base2histogram visits ~32 entries regardless of which percentile
+is queried, while Heistogram's scan length depends on the percentile.
 
-Neither direction universally wins. For latency monitoring, high percentiles (P99, P99.9) are typically the most queried, giving Heistogram a scan-direction advantage.
+| Percentile | Heistogram (high→low) | base2histogram (tiered forward) |
+|------------|----------------------|-------------------------------|
+| P99.9 | Fast (~few buckets) | ~32 iterations |
+| P99 | Fast | ~32 iterations |
+| P50 | Slow (half the buckets) | ~32 iterations |
+| P1 | Slow (almost all) | ~32 iterations |
 
-However, base2histogram's scan is always bounded at 252 iterations of cheap integer ops, while Heistogram's scan over a variable-capacity array with per-bucket `pow()` calls can be significantly more expensive per iteration.
+For log-normal latency data, base2histogram's forward region scan finds
+the target in 2-3 region checks because samples cluster in the lower
+buckets. Measured at ~10–15 ns per query.
 
 ### Efficiency Summary
 
 | Factor | Heistogram | base2histogram |
 |--------|-----------|----------------|
-| Scan bound | O(capacity) — unbounded | O(252) — fixed |
+| Scan bound | O(capacity) — unbounded | ~32 iterations (tiered regions) |
 | Per-bucket scan cost | Branch + possible `pow()` | One integer add |
-| Scan direction | High→low (good for P99) | Low→high (good for P1–P50) |
+| Scan direction | High→low (good for P99) | Forward with region-sum skip |
 | Boundary lookup | `ceil(pow(1.02, n))` each time | Precomputed table `[i]` |
 | Interpolation cost | 3 FP ops (linear) | ~10 FP ops (trapezoidal + sqrt) |
-| Batch queries | No optimization | Shares `total()` computation |
+| Batch queries | No optimization | `total()` is O(1) cached |
 | Serialized query | Yes (zero-alloc) | No |
-| Prefix-sum / binary search | No | No |
+| Region-sum acceleration | No | Yes (16-bucket groups) |
 
-For a single P99 query, Heistogram's reverse scan finds the answer in fewer iterations. But base2histogram's per-iteration cost is dramatically lower (integer add vs. exponentiation), and its fixed 252-bucket bound means worst-case is still fast. For batch percentile queries (the common case in metrics), base2histogram's cheap scan dominates despite the suboptimal direction for high percentiles.
+base2histogram's tiered scan visits ~32 entries regardless of percentile,
+with per-iteration cost of one integer add. Heistogram's reverse scan can
+find P99 quickly but pays `pow()` per bucket and has no bound on capacity.
+For batch percentile queries, base2histogram's O(1) cached total and cheap
+tiered scan dominate.

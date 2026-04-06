@@ -3,7 +3,7 @@
 Comparison of [base2histogram](https://github.com/drmingdrmer/base2histogram) ([intro](https://blog.openacid.com/algo/histogram/), Rust) and [H2 Histogram](https://github.com/iopsystems/histogram) ([intro](https://iop.systems/blog/h2-histogram/), Rust).
 
 Versions compared:
-- base2histogram v0.1.5 ([`08eb806`](https://github.com/drmingdrmer/base2histogram/commit/08eb806), 2026-04-03)
+- base2histogram v0.2.2 ([`9b3d181`](https://github.com/drmingdrmer/base2histogram/commit/9b3d181), 2026-04-05)
 - H2 Histogram v1.0.1-alpha.0 ([`a6958d8`](https://github.com/iopsystems/histogram/commit/a6958d8), 2026-03-20)
 
 ## H2 Histogram Algorithm
@@ -46,7 +46,7 @@ These two histograms share nearly identical bucket mapping math — both use bas
 | Aspect | H2 Histogram | base2histogram |
 |--------|-------------|----------------|
 | Bucket mapping | `leading_zeros` + shift + offset | `leading_zeros` + shift + offset |
-| Precision parameter | `grouping_power` (0–62) | `WIDTH` (1–6+), compile-time const |
+| Precision parameter | `grouping_power` (0–62) | `WIDTH` (1–16), runtime parameter |
 | Parameter equivalence | `grouping_power = g` | `WIDTH = g + 1` |
 | Small-value exact range | 0 to `2^(g+1) - 1` | 0 to `2^(WIDTH-1) - 1` |
 | Total buckets (u64 range) | `2^(g+1) + (64-g-1)·2^g` | `2^(WIDTH-1) · (66 - WIDTH)` |
@@ -123,9 +123,9 @@ then solves the CDF inverse to place the estimate within the bucket. This produc
 
 Multi-slot architecture maintains per-slot bucket arrays plus a running aggregate. `advance()` evicts the oldest slot in O(bucket_count) — one subtraction per bucket. H2's `checked_sub` can subtract histograms but requires the caller to manage the window and retain full per-window histograms externally.
 
-### 4. Compile-time WIDTH optimization
+### 4. Precomputed LogScale with LazyLock
 
-WIDTH is a const generic, so all derived constants (GROUP_SIZE, MASK, BUCKETS) are computed at compile time with zero runtime overhead. The compiler can inline and optimize the entire bucket calculation path. H2's `grouping_power` is a runtime parameter stored in `Config`, requiring runtime field access.
+WIDTH (1..=16) is a runtime parameter, but `LogScale` instances are created once via `LazyLock` and shared as `&'static` references. All derived constants (group_size, mask, bucket boundaries) are computed once and reused. H2's `grouping_power` is also runtime but recomputes boundaries on demand.
 
 ## Percentile Calculation
 
@@ -144,20 +144,20 @@ let count = (percentile * total_count as f64).ceil() as u128;
 - **Per-bucket cost**: One integer add + one comparison
 - **Boundary cost**: `index_to_lower_bound()` / `index_to_upper_bound()` computed per result (several shifts and adds)
 
-### base2histogram: `value_at_rank()`
+### base2histogram: `bucket_at_rank()` + `rank_to_position()`
 
-Forward scan (0 → 251):
+Tiered two-phase scan via cached region sums (groups of 16 buckets):
 
 ```rust
-cumulative += count;
-if cumulative >= rank {
-    return self.log_scale.interpolate(bucket_index, rank - prev, count, prev_count, next_count);
-}
+// Phase 1: scan ~16 region sums
+// Phase 2: scan ~16 buckets within the matching region
+let (bucket, cumulative_before) = slot.bucket_at_rank(rank)?;
+interp.rank_to_position(bucket, rank - cumulative_before)
 ```
 
 - **Returns**: A single u64 value — interpolated point estimate
-- **Batch optimization**: Shares `total()` computation across percentile queries
-- **Per-bucket cost**: One integer add + one comparison (identical to H2)
+- **Total cached**: `total()` is O(1) — cached in the Slot
+- **Per-entry cost**: One integer add + one comparison (~32 entries total)
 - **Boundary cost**: `bucket_min_values[i]` — table lookup
 - **Interpolation cost**: ~10 FP ops (runs once on the target bucket)
 
@@ -165,16 +165,17 @@ if cumulative >= rank {
 
 | Factor | H2 Histogram | base2histogram |
 |--------|-------------|----------------|
-| Scan direction | Forward (0 → end) | Forward (0 → end) |
-| Scan bound | O(total_buckets) — configurable | O(252) — fixed at WIDTH=3 |
-| Per-bucket scan cost | One integer add | One integer add |
+| Scan direction | Forward (0 → end) | Forward with region-sum skip |
+| Scan bound | O(total_buckets) — configurable | ~32 iterations (tiered regions) |
+| Per-entry scan cost | One integer add | One integer add |
 | Result type | Bucket range | Interpolated point value |
 | Boundary lookup | Computed (shifts + adds) | Precomputed table |
 | Interpolation | None | Trapezoidal (~10 FP ops, once) |
-| Batch percentiles | Sorted single-pass O(B+P) | Independent queries |
+| Batch percentiles | Sorted single-pass O(B+P) | Independent queries, O(1) total |
+| Region-sum acceleration | No | Yes (16-bucket groups) |
 | Sparse percentiles | Yes (skip zero buckets) | No |
 
-For a single percentile query both perform an O(buckets) scan with the same per-bucket cost. H2 wins on batch queries with its sorted single-pass optimization. base2histogram wins on result quality — returning a precise point estimate instead of a bucket range.
+For a single percentile query, base2histogram's tiered scan (~32 iterations) is faster than H2's full linear scan (up to 252 at g=2). H2 wins on batch queries with its sorted single-pass optimization. base2histogram wins on result quality — returning a precise point estimate instead of a bucket range.
 
 ## Feature Matrix
 
@@ -192,7 +193,7 @@ For a single percentile query both perform an O(buckets) scan with the same per-
 | Percentile rank (inverse) | No | No |
 | Serde serialization | Yes (feature-gated) | No |
 | JSON Schema | Yes (feature-gated) | No |
-| Configurable at runtime | Yes (grouping_power) | No (compile-time WIDTH) |
+| Configurable at runtime | Yes (grouping_power) | Yes (WIDTH 1–16, LazyLock) |
 | Precomputed boundaries | No | Yes |
 | Small-value cache | No | Yes (4096 entries) |
 

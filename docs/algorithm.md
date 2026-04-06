@@ -311,7 +311,7 @@ If the percentile returns the **midpoint** of the bucket, the max error halves t
 
 Trapezoidal interpolation reduces practical error well below the theoretical bound for smooth distributions.
 
-Measured with 1,000,000 samples per distribution, WIDTH=3 (252 buckets, 2 KB):
+Measured with 1,000,000 samples per distribution, WIDTH=3 (252 buckets, ~2.1 KB per slot):
 
 ```
                    P50      P95      P99
@@ -325,7 +325,7 @@ Uniform           0.012%   1.035%   3.706%    synthetic benchmark
 Sequent           0.000%   1.011%   3.696%    adversarial worst case
 ```
 
-For the latency distributions that matter most (LN-API, LN-DB), WIDTH=3 delivers sub-0.2% error on 2 KB of memory.
+For the latency distributions that matter most (LN-API, LN-DB), WIDTH=3 delivers sub-0.2% error on ~2 KB of memory.
 
 ## Data Structures
 
@@ -338,14 +338,12 @@ pub struct Histogram<T = ()> {
     log_scale: &'static LogScale,
     slots: SlotQueue<T>,
     aggregate: Slot<T>,
-    total: u64,
 }
 ```
 
 - `log_scale`: shared reference to precomputed lookup tables
 - `slots`: historical time-window slots (up to `slot_limit - 1`)
-- `aggregate`: running sum of all slot buckets (`.buckets`) and current period metadata (`.data`)
-- `total`: cached total sample count
+- `aggregate`: running sum of all slot buckets (`.buckets`), cached total (`.total`), and current period metadata (`.data`)
 
 ### `LogScale`
 
@@ -387,14 +385,27 @@ pub struct LogScaleConfig {
 
 ### `Slot<T>`
 
-An individual time window in the sliding-window architecture.
+A bucket array with cached aggregates, used both as the aggregate
+accumulator and as individual time-window snapshots.
 
 ```rust
 pub struct Slot<T> {
     buckets: Vec<u64>,
+    region_sums: Vec<u64>,
+    total: u64,
     data: Option<T>,
 }
 ```
+
+- `buckets`: per-bucket sample counts
+- `region_sums`: cached sum for each group of 16 buckets, enabling tiered rank lookup
+- `total`: cached total sample count across all buckets
+- `data`: optional user metadata (e.g., timestamp, label)
+
+Key methods: `record_n()`, `subtract()`, `clear()`, `bucket_at_rank()`.
+`bucket_at_rank()` uses a two-phase scan — first over `region_sums`
+(~16 entries), then within the matching region (~16 buckets) — reducing
+percentile lookup from O(bucket_count) to O(bucket_count / 16).
 
 ### `Interpolator`
 
@@ -446,7 +457,10 @@ implicit:      d = agg - a - b - c    (current period, not stored)
 
 ### Slot Rotation (`advance()`)
 
-When `advance()` is called with new metadata, the implicit current period is materialized and the oldest period is evicted:
+`advance(data)` materializes the implicit current period into a stored
+historical slot, then starts a new empty current period. Returns the
+evicted slot's metadata (`Option<T>`) if a slot was evicted, or `None`
+during warmup:
 
 **At capacity** (queue full):
 ```
@@ -507,15 +521,20 @@ The `round()` preserves integer totals: since each destination count is derived 
 - The aggregate slot (running sum of all periods)
 - Each historical slot in the queue
 
-The `total` sample count is preserved exactly. Slot metadata (`T`) is cloned.
+Each rebinned slot recomputes its `total` and `region_sums` from the new
+buckets via `Slot::from_buckets()`. Slot metadata (`T`) is cloned.
 
 ## Complexity
 
 | Operation | Time | Space |
 |-----------|------|-------|
 | Record a value | O(1) | — |
-| Percentile query | O(bucket_count) | — |
+| Percentile query | O(bucket_count / 16) | — |
 | Advance slot | O(bucket_count) | — |
 | Rescale | O(src_buckets + dst_buckets) per slot | O(dst_buckets) |
-| Memory per slot | — | `bucket_count × 8` bytes |
-| Total (WIDTH=3, 1 slot) | — | ~2 KB |
+| Memory per slot | — | `bucket_count × 8 + region_count × 8 + 8` bytes |
+| Total (WIDTH=3, 1 slot) | — | ~2.1 KB |
+
+Percentile queries use the tiered region scan in `bucket_at_rank()`:
+~16 region sums + ~16 buckets = ~32 iterations instead of 252.
+Measured at ~10–15 ns per query on 1M log-normal samples.
