@@ -317,39 +317,47 @@ impl<T> Histogram<T> {
         BucketRef::new(self.log_scale, index, self.aggregate_buckets[index])
     }
 
-    /// Re-bins this histogram into a different log scale.
+    /// Re-bins this histogram into a different log scale, preserving all slots.
     ///
     /// For each target bucket `[left, right)`, estimates the sample count via
     /// `count_below(right) - count_below(left)` using f64 CDF values, then
     /// rounds to the nearest integer while tracking the fractional remainder
     /// to preserve the exact total.
-    pub fn rescale(&self, width: usize) -> Histogram<T> {
-        let mut target = Histogram::<T>::with_log_scale(width, 1);
-        let mut cursor = self.cumulative_count();
+    pub fn rescale(&self, width: usize) -> Histogram<T>
+    where T: Clone {
+        let dst_scale = LogScale::get(width);
+
+        let aggregate_buckets = Self::rebin(self.log_scale, &self.aggregate_buckets, dst_scale);
+
+        let mut slots = SlotQueue::new(self.slots.slot_limit);
+        for src_slot in self.slots.iter_all() {
+            slots.push_back(Slot {
+                buckets: Self::rebin(self.log_scale, &src_slot.buckets, dst_scale),
+                data: src_slot.data.clone(),
+            });
+        }
+        slots.current_data = self.slots.current_data.clone();
+
+        Histogram {
+            log_scale: dst_scale,
+            slots,
+            aggregate_buckets,
+        }
+    }
+
+    /// Re-bins bucket counts from one log scale to another.
+    fn rebin(src_scale: &LogScale, src_buckets: &[u64], dst_scale: &'static LogScale) -> Vec<u64> {
+        let mut dst = vec![0u64; dst_scale.num_buckets()];
+        let mut cursor = CumulativeCount::new(src_scale, src_buckets);
         let mut prev_cdf = 0u64;
 
-        for new_index in 0..target.num_buckets() {
-            let b = target.bucket(new_index);
-            let cdf_right = cursor.count_below(b.right());
-            println!(
-                "new_index={new_index} new_right={} cdf_right={cdf_right}, src_bucket={}, src_cumulative={}",
-                b.right(),
-                cursor.current_bucket(),
-                cursor.whole_bucket_accumulated()
-            );
-
-            let cdf_right = cdf_right.round() as u64;
-
-            let count = cdf_right - prev_cdf;
-
-            if count > 0 {
-                target.record_n(b.left(), count);
-            }
-
+        for (i, count) in dst.iter_mut().enumerate() {
+            let cdf_right = cursor.count_below(dst_scale.bucket_span(i).right()).round() as u64;
+            *count = cdf_right - prev_cdf;
             prev_cdf = cdf_right;
         }
 
-        target
+        dst
     }
 
     /// Returns a display wrapper that prints non-empty buckets, one per line.
@@ -1012,6 +1020,63 @@ mod tests {
 
         assert_eq!(back.total(), src.total());
         assert_eq!(back.display_buckets().to_string(), src.display_buckets().to_string());
+    }
+
+    #[test]
+    fn test_rescale_preserves_slots() {
+        let mut src = Histogram::<&str>::with_log_scale(2, 3);
+
+        // Slot 0 (initial): record small values
+        src.record_n(10, 5);
+        src.record_n(50, 3);
+
+        // Slot 1: record medium values
+        src.advance("warm");
+        src.record_n(100, 4);
+        src.record_n(500, 6);
+
+        // Current (implicit): record large values
+        src.advance("hot");
+        src.record_n(1000, 7);
+
+        assert_eq!(src.active_slot_count(), 3);
+        assert_eq!(src.slot_limit(), 3);
+        assert_eq!(src.total(), 25);
+
+        let rescaled = src.rescale(5);
+
+        // Slot structure preserved
+        assert_eq!(rescaled.slot_limit(), 3);
+        assert_eq!(rescaled.active_slot_count(), 3);
+        assert_eq!(rescaled.slots.slots.len(), 2); // 2 stored historicals
+
+        // Slot metadata preserved:
+        // stored[0] = initial period (data=None)
+        // stored[1] = "warm" period
+        // current  = "hot" period (implicit)
+        assert_eq!(rescaled.slots.slots.front().unwrap().data, None);
+        assert_eq!(rescaled.slots.slots.get(1).unwrap().data, Some("warm"));
+        assert_eq!(rescaled.slots.current_data, Some("hot"));
+
+        // Total preserved
+        assert_eq!(rescaled.total(), 25);
+
+        // Individual slot totals preserved
+        let slot0_total: u64 = rescaled.slots.slots.front().unwrap().buckets.iter().sum();
+        let slot1_total: u64 = rescaled.slots.slots.get(1).unwrap().buckets.iter().sum();
+        assert_eq!(slot0_total, 8); // 5 + 3
+        assert_eq!(slot1_total, 10); // 4 + 6
+        // Implicit current total = aggregate - stored = 25 - 8 - 10 = 7
+        let current_total = rescaled.total() - slot0_total - slot1_total;
+        assert_eq!(current_total, 7);
+
+        // Eviction still works after rescale
+        let prev_total = rescaled.total();
+        let mut rescaled = rescaled;
+        rescaled.advance("cool");
+        // Evicts slot 0 (total=8), so total drops by 8
+        assert_eq!(rescaled.total(), prev_total - slot0_total);
+        assert_eq!(rescaled.active_slot_count(), 3);
     }
 
     test_histogram_width_edge_cases!(test_width_edge_1, 1);
