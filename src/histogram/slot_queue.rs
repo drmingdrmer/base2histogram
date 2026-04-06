@@ -1,66 +1,56 @@
 use std::collections::VecDeque;
-use std::ops::Deref;
-use std::ops::DerefMut;
 
 use super::slot::Slot;
 
-/// A slot container with stable logical capacity semantics.
+/// A container for historical slots with an implicit current period.
 ///
-/// The logical slot limit is tracked separately from the underlying `VecDeque`
-/// allocation capacity, which may grow beyond the requested value.
+/// Stores up to `slot_limit - 1` historical slots. The current period's
+/// bucket counts are not stored — they are derived from
+/// `aggregate_buckets - Σ stored_slots` in `Histogram`.
+///
+/// The `current_data` field holds metadata for the implicit current period.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SlotQueue<T> {
-    slot_limit: usize,
-    slots: VecDeque<Slot<T>>,
+    pub(crate) slot_limit: usize,
+    pub(crate) slots: VecDeque<Slot<T>>,
+    pub(crate) current_data: Option<T>,
 }
 
 impl<T> SlotQueue<T> {
-    pub(crate) fn new(slot_limit: usize, num_buckets: usize) -> Self {
-        let mut slots = VecDeque::with_capacity(slot_limit);
-        // When slot_limit <= 1, aggregate_buckets is the sole source of truth;
-        // no slots are created.
-        if slot_limit > 1 {
-            slots.push_back(Slot::new(num_buckets));
+    pub(crate) fn new(slot_limit: usize) -> Self {
+        Self {
+            slot_limit,
+            slots: VecDeque::with_capacity(slot_limit.saturating_sub(1)),
+            current_data: None,
         }
-
-        Self { slot_limit, slots }
     }
 
-    #[inline]
-    pub(crate) fn slot_limit(&self) -> usize {
-        self.slot_limit
+    pub(crate) fn pop_front(&mut self) -> Option<Slot<T>> {
+        self.slots.pop_front()
     }
-}
 
-impl<T> Deref for SlotQueue<T> {
-    type Target = VecDeque<Slot<T>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.slots
+    pub(crate) fn push_back(&mut self, slot: Slot<T>) {
+        self.slots.push_back(slot);
     }
-}
 
-impl<T> DerefMut for SlotQueue<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.slots
+    pub(crate) fn iter_all(&self) -> impl Iterator<Item = &Slot<T>> {
+        self.slots.iter()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Deref;
-
     use super::*;
 
     #[test]
     fn test_slot_limit_is_stable_when_vecdeque_reserves_more() {
-        let mut slots: SlotQueue<()> = SlotQueue::new(3, 4);
+        let mut q: SlotQueue<()> = SlotQueue::new(3);
 
-        assert_eq!(slots.slot_limit(), 3);
+        assert_eq!(q.slot_limit, 3);
 
-        slots.reserve(16);
+        q.slots.reserve(16);
 
-        assert!(Deref::deref(&slots).capacity() > slots.slot_limit());
-        assert_eq!(slots.slot_limit(), 3);
+        assert!(q.slots.capacity() > q.slot_limit);
+        assert_eq!(q.slot_limit, 3);
     }
 }

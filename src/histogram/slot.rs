@@ -8,6 +8,7 @@ pub(crate) struct Slot<T> {
 }
 
 impl<T> Slot<T> {
+    #[cfg(test)]
     pub(crate) fn new(num_buckets: usize) -> Self {
         Self {
             buckets: vec![0; num_buckets],
