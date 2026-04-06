@@ -19,23 +19,21 @@ pub struct LogScale {
     small_value_buckets: Vec<u8>,
 }
 
-const MAX_WIDTH: usize = 16;
-
-static LOG_SCALES: LazyLock<Vec<LogScale>> = LazyLock::new(|| (1..=MAX_WIDTH).map(LogScale::new).collect());
+static LOG_SCALES: LazyLock<Vec<LogScale>> =
+    LazyLock::new(|| (LogScaleConfig::MIN_WIDTH..=LogScaleConfig::MAX_WIDTH).map(LogScale::new).collect());
 
 impl LogScale {
     pub const DEFAULT_WIDTH: usize = 3;
 
     /// Returns a shared `LogScale` instance for the given width (1..=16).
     pub fn get(width: usize) -> &'static LogScale {
-        assert!(
-            (1..=MAX_WIDTH).contains(&width),
-            "width must be 1..={MAX_WIDTH}, got {width}"
-        );
+        LogScaleConfig::validate_width(width);
         &LOG_SCALES[width - 1]
     }
 
-    /// Creates a new LogScale for the given width configuration.
+    /// Creates a new `LogScale` for the given width configuration.
+    ///
+    /// `width` must be in `1..=16`.
     pub fn new(width: usize) -> Self {
         let mut s = Self {
             config: LogScaleConfig::new(width),
@@ -143,6 +141,18 @@ mod tests {
             scale.num_buckets(),
             LogScale::get(LogScale::DEFAULT_WIDTH).num_buckets()
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "width must be 1..=16, got 0")]
+    fn test_get_rejects_zero_width() {
+        let _ = LogScale::get(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "width must be 1..=16, got 17")]
+    fn test_new_rejects_width_above_max() {
+        let _ = LogScale::new(17);
     }
 
     #[test]
@@ -258,8 +268,8 @@ mod tests {
         // Group 4: width=8
         assert_eq!(s.bucket_span(16).width(), 8); // [32,40)
 
-        // Last bucket (251): right=u64::MAX, left=0b111<<61
-        assert_eq!(s.bucket_span(251).width(), u64::MAX - (0b111 << 61));
+        // Last bucket (251): [0b111<<61, u64::MAX]
+        assert_eq!(s.bucket_span(251).width(), u64::MAX - (0b111 << 61) + 1);
 
         // Second-to-last bucket (250): step=2^61
         assert_eq!(s.bucket_span(250).width(), 1 << 61);
@@ -295,7 +305,8 @@ mod tests {
         let b = LogScale::get(3).bucket_span(251);
         assert_eq!(b.left(), 0b111 << 61);
         assert_eq!(b.right(), u64::MAX);
-        assert_eq!(b.width(), u64::MAX - (0b111 << 61));
+        assert!(b.is_last());
+        assert_eq!(b.width(), u64::MAX - (0b111 << 61) + 1);
     }
 
     #[test]

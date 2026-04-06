@@ -166,7 +166,7 @@ impl<'a> Interpolator<'a> {
             if disc < 0.0 { rank / d1 } else { (-a + disc.sqrt()) / k }
         };
 
-        b.left() + x.clamp(0.0, w) as u64
+        b.left().saturating_add(x.clamp(0.0, w) as u64).min(b.right())
     }
 
     /// Returns the estimated count of samples in `[0, position)`,
@@ -174,17 +174,23 @@ impl<'a> Interpolator<'a> {
     ///
     /// Sums the full count of every bucket entirely before `position`,
     /// then adds the partial count within the bucket containing `position`
-    /// using `trapezoidal_cdf`.
+    /// using `trapezoidal_cdf`. For the terminal bucket, `position == u64::MAX`
+    /// still excludes the endpoint mass at `u64::MAX`.
     pub fn count_below(&self, position: u64) -> f64 {
         let mut total = 0.0;
 
         for i in 0..self.num_buckets() {
             let b = self.bucket(i);
+            let past_bucket = if b.is_last() {
+                position > b.right()
+            } else {
+                position >= b.right()
+            };
 
-            if position >= b.right() {
+            if past_bucket {
                 total += b.count() as f64;
             } else {
-                total += self.trapezoidal_cdf(i, position - b.left());
+                total += self.trapezoidal_cdf(i, position.saturating_sub(b.left()));
                 break;
             }
         }
@@ -256,9 +262,10 @@ mod tests {
     #[test]
     fn test_slope_last_buckets() {
         let w250: f64 = (1u128 << 61) as f64;
-        let w251: f64 = (u64::MAX - (0b111 << 61)) as f64;
+        let span251: f64 = (u64::MAX - (0b111 << 61)) as f64;
+        let w251: f64 = (u64::MAX - (0b111 << 61) + 1) as f64;
         let m250: f64 = (0b110u128 << 61) as f64 + w250 / 2.0;
-        let m251: f64 = (0b111u128 << 61) as f64 + w251 / 2.0;
+        let m251: f64 = (0b111u128 << 61) as f64 + span251 / 2.0;
 
         // Last bucket (251): uses (left=250, self=251)
         let k = slope(&[(0b110 << 61, 100), (0b111 << 61, 200)], 251);
@@ -454,14 +461,14 @@ mod tests {
 
     #[test]
     fn test_cdf_last_bucket() {
-        // Bucket 251: [0b111<<61, u64::MAX)
+        // Bucket 251: [0b111<<61, u64::MAX]
         // Uses (left=250, self=251) for slope
         let r = &[(0b110 << 61, 100), (0b111 << 61, 200)];
 
         let c = cdf(r, 251, 0);
         assert!(c.abs() < 1e-10);
 
-        let w251 = u64::MAX - (0b111 << 61);
+        let w251 = u64::MAX - (0b111 << 61) + 1;
         let c = cdf(r, 251, w251);
         assert!((c - 200.0).abs() < 1e-6);
     }
@@ -741,6 +748,16 @@ mod tests {
         let c = count_below(r, u64::MAX - 1);
         assert!(c > 0.0);
         assert!(c <= 100.0);
+    }
+
+    #[test]
+    fn test_count_below_u64_max_excludes_terminal_endpoint_mass() {
+        let mut h = Histogram::<()>::with_log_scale(16, 1);
+        h.record_n(u64::MAX, 100);
+
+        let c = h.interpolator().count_below(u64::MAX);
+        assert!(c > 0.0);
+        assert!(c < 100.0, "count_below(u64::MAX) should exclude the endpoint");
     }
 
     #[test]

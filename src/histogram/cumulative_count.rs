@@ -42,6 +42,8 @@ impl<'a> CumulativeCount<'a> {
     /// Returns the estimated count of samples in `[0, position)`.
     ///
     /// Each successive call must pass a `position` >= the previous one.
+    /// For the terminal bucket, `position == u64::MAX` still excludes the
+    /// endpoint mass at `u64::MAX`.
     ///
     /// # Panics
     ///
@@ -57,12 +59,18 @@ impl<'a> CumulativeCount<'a> {
                 "CumulativeCount::count_below requires monotonically increasing positions"
             );
 
-            if position >= b.right() {
+            let past_bucket = if b.is_last() {
+                position > b.right()
+            } else {
+                position >= b.right()
+            };
+
+            if past_bucket {
                 self.accumulated += b.count();
                 self.bucket_index += 1;
             } else {
                 // Position falls within this bucket
-                let partial = self.interpolator.trapezoidal_cdf(self.bucket_index, position - b.left());
+                let partial = self.interpolator.trapezoidal_cdf(self.bucket_index, position.saturating_sub(b.left()));
                 return self.accumulated as f64 + partial;
             }
         }
@@ -242,6 +250,18 @@ mod tests {
         let c = cursor.count_below(u64::MAX - 1);
         assert!(c > 0.0);
         assert!(c <= 100.0);
+    }
+
+    #[test]
+    fn test_cursor_u64_max_excludes_terminal_endpoint_mass() {
+        let mut hist = Histogram::<()>::with_log_scale(16, 1);
+        hist.record_n(u64::MAX, 100);
+        let hist = Box::leak(Box::new(hist));
+
+        let mut cursor = hist.cumulative_count();
+        let c = cursor.count_below(u64::MAX);
+        assert!(c > 0.0);
+        assert!(c < 100.0, "count_below(u64::MAX) should exclude the endpoint");
     }
 
     #[test]

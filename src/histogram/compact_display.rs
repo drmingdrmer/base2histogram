@@ -47,7 +47,8 @@ impl<T> fmt::Display for CompactDisplay<'_, T> {
             for _ in this_width..range_width {
                 f.write_char(' ')?;
             }
-            write!(f, "[{},{})  ", b.left(), b.right())?;
+            let close = if b.is_last() { ']' } else { ')' };
+            write!(f, "[{},{}{}  ", b.left(), b.right(), close)?;
 
             self.chart.write_bar(f, bucket_i, max_count)?;
 
@@ -68,9 +69,9 @@ impl<T> fmt::Display for CompactDisplay<'_, T> {
     }
 }
 
-/// Width of `"[left,right)"` without allocating.
+/// Width of `"[left,right)"` or `"[left,right]"` without allocating.
 fn compact_range_width(left: u64, right: u64) -> usize {
-    1 + digit_count(left) + 1 + digit_count(right) + 1 // "[left,right)"
+    1 + digit_count(left) + 1 + digit_count(right) + 1
 }
 
 #[cfg(test)]

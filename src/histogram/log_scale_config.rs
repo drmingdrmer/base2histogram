@@ -34,8 +34,24 @@ pub struct LogScaleConfig {
 }
 
 impl LogScaleConfig {
+    pub const MIN_WIDTH: usize = 1;
+    pub const MAX_WIDTH: usize = 16;
+
+    pub(crate) fn validate_width(width: usize) {
+        assert!(
+            (Self::MIN_WIDTH..=Self::MAX_WIDTH).contains(&width),
+            "width must be {}..={}, got {}",
+            Self::MIN_WIDTH,
+            Self::MAX_WIDTH,
+            width
+        );
+    }
+
     /// Creates a config for the given bit-width.
+    ///
+    /// `width` must be in `1..=16`.
     pub fn new(width: usize) -> Self {
+        Self::validate_width(width);
         let group_size = 1 << (width - 1);
         let mask = (group_size - 1) as u64;
         let buckets = group_size * (66 - width);
@@ -71,5 +87,28 @@ impl LogScaleConfig {
     /// Number of values eligible for the small-value lookup cache.
     pub fn small_value_cache_size(&self) -> usize {
         self.small_value_cache_size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LogScaleConfig;
+
+    #[test]
+    fn test_new_accepts_supported_widths() {
+        assert_eq!(LogScaleConfig::new(1).width(), 1);
+        assert_eq!(LogScaleConfig::new(16).width(), 16);
+    }
+
+    #[test]
+    #[should_panic(expected = "width must be 1..=16, got 0")]
+    fn test_new_rejects_zero_width() {
+        let _ = LogScaleConfig::new(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "width must be 1..=16, got 17")]
+    fn test_new_rejects_width_above_max() {
+        let _ = LogScaleConfig::new(17);
     }
 }

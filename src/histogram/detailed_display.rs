@@ -47,12 +47,14 @@ impl<T> fmt::Display for DetailedDisplay<'_, T> {
         // Data rows
         for &bucket_i in &indices {
             let b = h0.bucket(bucket_i);
+            let close = if b.is_last() { ']' } else { ')' };
 
             write!(
                 f,
-                "[{:>w1$}, {:>w2$}) | ",
+                "[{:>w1$}, {:>w2$}{} | ",
                 b.left(),
                 b.right(),
+                close,
                 w1 = max_left_width,
                 w2 = max_right_width
             )?;

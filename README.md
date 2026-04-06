@@ -2,13 +2,14 @@
 
 ![](logo.svg)
 
-`base2histogram` is a 2 KB histogram that tracks any `u64` distribution and
+`base2histogram` is a fixed-size histogram that tracks any `u64` distribution
+with 252 bucket counters by default (~2.0 KiB of counters per slot), and
 answers percentile queries (P50, P99, P99.9, …) with under 2% error for
 typical latency workloads.
 
 - **Near-zero error for API latency tracking** — log-normal distributions
   (typical for API/service latency) achieve **< 0.3% error at P50/P95/P99**
-  with just 2 KB (default WIDTH=3, 252 buckets):
+  with 252 bucket counters by default (~2.0 KiB of counters per slot):
   ```text
   LN-API  P50  0.000%     P95  0.160%     P99  0.228%
   ```
@@ -88,6 +89,8 @@ The `WIDTH` parameter controls bucket granularity: each bucket group uses
 finer resolution but more memory. The default is `WIDTH=3` (252 buckets).
 
 Measured with 1,000,000 samples per distribution (`cargo run --bin accuracy`).
+Memory below counts bucket counters only; each slot also keeps a small cached
+region summary, total count, and optional metadata.
 Error = `|exact - estimated| / exact × 100%`, shown at P50 / P95 / P99:
 
 ```text

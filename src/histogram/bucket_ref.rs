@@ -16,12 +16,14 @@ pub struct BucketRef<'a> {
 
 impl fmt::Display for BucketRef<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let close = if self.is_last() { ']' } else { ')' };
         write!(
             f,
-            "b{}[{},{})={}",
+            "b{}[{},{}{}={}",
             self.index(),
             self.left(),
             self.right(),
+            close,
             self.count()
         )
     }
@@ -41,6 +43,12 @@ impl<'a> BucketRef<'a> {
         &self.span
     }
 
+    /// Returns `true` if this bucket contains `u64::MAX`.
+    #[inline]
+    pub fn is_last(&self) -> bool {
+        self.span.is_last()
+    }
+
     /// Bucket index.
     #[inline]
     pub fn index(&self) -> usize {
@@ -53,19 +61,21 @@ impl<'a> BucketRef<'a> {
         self.span.left()
     }
 
-    /// The right open boundary that maps to this bucket.
+    /// The upper boundary that maps to this bucket.
+    ///
+    /// This is exclusive for every bucket except the last one.
     #[inline]
     pub fn right(&self) -> u64 {
         self.span.right()
     }
 
-    /// Width of the bucket: `right - left`.
+    /// Number of integer values represented by this bucket.
     #[inline]
     pub fn width(&self) -> u64 {
         self.span.width()
     }
 
-    /// Midpoint of the bucket: `left + width / 2`.
+    /// Midpoint of the bucket's value range.
     #[inline]
     pub fn midpoint(&self) -> u64 {
         self.span.midpoint()
@@ -141,9 +151,11 @@ mod tests {
         assert_eq!(b.index(), 251);
         assert_eq!(b.left(), 0b111 << 61);
         assert_eq!(b.right(), u64::MAX);
-        assert_eq!(b.width(), u64::MAX - (0b111 << 61));
+        assert!(b.is_last());
+        assert_eq!(b.width(), u64::MAX - (0b111 << 61) + 1);
         assert_eq!(b.midpoint(), (0b111 << 61) + (u64::MAX - (0b111 << 61)) / 2);
         assert_eq!(b.count(), 2);
+        assert_eq!(b.to_string(), format!("b251[{},{}]=2", 0b111u64 << 61, u64::MAX));
     }
 
     #[test]

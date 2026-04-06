@@ -27,26 +27,36 @@ impl<'a> BucketSpan<'a> {
         self.log_scale.bucket_min_values[self.index]
     }
 
-    /// Right (exclusive) boundary.
+    /// Returns `true` if this is the terminal bucket that contains `u64::MAX`.
+    #[inline]
+    pub fn is_last(&self) -> bool {
+        self.index + 1 == self.log_scale.bucket_min_values.len()
+    }
+
+    /// Upper boundary.
+    ///
+    /// This is exclusive for every bucket except the last one.
+    /// The terminal bucket returns `u64::MAX` and includes that value.
     #[inline]
     pub fn right(&self) -> u64 {
-        if self.index + 1 < self.log_scale.bucket_min_values.len() {
+        if !self.is_last() {
             self.log_scale.bucket_min_values[self.index + 1]
         } else {
             u64::MAX
         }
     }
 
-    /// Width of the bucket: `right - left`.
+    /// Number of integer values represented by this bucket.
     #[inline]
     pub fn width(&self) -> u64 {
-        self.right() - self.left()
+        let span = self.right() - self.left();
+        if self.is_last() { span + 1 } else { span }
     }
 
-    /// Midpoint of the bucket: `left + width / 2`.
+    /// Midpoint of the bucket's value range.
     #[inline]
     pub fn midpoint(&self) -> u64 {
-        self.left() + self.width() / 2
+        self.left() + (self.right() - self.left()) / 2
     }
 }
 
@@ -93,12 +103,13 @@ mod tests {
             (16, 32, 40, 8, 36)
         );
 
-        // Last bucket (251): right=u64::MAX
+        // Last bucket (251): [0b111<<61, u64::MAX]
         let b = scale.bucket_span(251);
         assert_eq!(b.index(), 251);
         assert_eq!(b.left(), 0b111 << 61);
         assert_eq!(b.right(), u64::MAX);
-        assert_eq!(b.width(), u64::MAX - (0b111 << 61));
+        assert!(b.is_last());
+        assert_eq!(b.width(), u64::MAX - (0b111 << 61) + 1);
         assert_eq!(b.midpoint(), (0b111 << 61) + (u64::MAX - (0b111 << 61)) / 2);
     }
 }

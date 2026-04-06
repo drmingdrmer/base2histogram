@@ -62,4 +62,14 @@ mod tests {
         hist.record_n(1000, 7);
         assert_eq!(hist.display_buckets().to_string(), "b0[0,1)=3\nb35[896,1024)=7");
     }
+
+    #[test]
+    fn test_display_last_bucket_uses_closed_range() {
+        let mut hist: Histogram = Histogram::new();
+        hist.record_n(u64::MAX, 1);
+        assert_eq!(
+            hist.display_buckets().to_string(),
+            format!("b251[{},{}]=1", 0b111u64 << 61, u64::MAX)
+        );
+    }
 }

@@ -85,8 +85,10 @@ use crate::histogram::display_buckets::DisplayBuckets;
 ///
 /// # Memory Usage
 ///
-/// Fixed at 252 buckets * 8 bytes = 2,016 bytes per slot, covering the entire
-/// u64 range [0, 2^64-1].
+/// Bucket counters are fixed at 252 * 8 bytes = 2,016 bytes per slot at the
+/// default width, covering the entire u64 range [0, 2^64-1].
+/// Each slot also keeps a small cached region summary, total count, and
+/// optional metadata.
 ///
 /// # Type Parameter
 ///
@@ -116,26 +118,29 @@ impl<T> Default for Histogram<T> {
 impl<T> Histogram<T> {
     /// Creates a new histogram with 1 slot and 252 buckets.
     ///
-    /// Memory usage: 252 * 8 bytes = 2,016 bytes per histogram.
+    /// Bucket counters use 252 * 8 bytes = 2,016 bytes at the default width.
     pub fn new() -> Self {
         Self::with_slots(1)
     }
 
     /// Creates a new histogram with the specified slot limit.
     ///
-    /// When `slot_limit` is 0 or 1, no individual slots are maintained —
-    /// the aggregate is the sole source of truth.
+    /// `slot_limit` is normalized to at least 1. When the caller passes 0 or 1,
+    /// no individual historical slots are maintained and only the implicit
+    /// current period exists.
     pub fn with_slots(slot_limit: usize) -> Self {
         Self::with_log_scale(LogScale::DEFAULT_WIDTH, slot_limit)
     }
 
     /// Creates a new histogram with the specified bucket width and slot limit.
     ///
-    /// When `slot_limit` is 0 or 1, no individual slots are maintained —
-    /// the aggregate is the sole source of truth.
+    /// `slot_limit` is normalized to at least 1. When the caller passes 0 or 1,
+    /// no individual historical slots are maintained and only the implicit
+    /// current period exists.
     pub fn with_log_scale(width: usize, slot_limit: usize) -> Self {
         let log_scale = LogScale::get(width);
         let num_buckets = log_scale.num_buckets();
+        let slot_limit = slot_limit.max(1);
 
         Self {
             log_scale,
@@ -168,8 +173,9 @@ impl<T> Histogram<T> {
     /// See [Slot Storage Layout](Histogram#slot-storage-layout) for the
     /// rotation algorithm.
     pub fn advance(&mut self, data: T) -> Option<T> {
-        if self.slots.slot_limit <= 1 {
+        if self.slots.slot_limit == 1 {
             self.aggregate.clear();
+            self.aggregate.data = Some(data);
             return None;
         }
 
@@ -216,11 +222,7 @@ impl<T> Histogram<T> {
     /// Returns the number of active slots (stored historicals + implicit current).
     #[inline]
     pub fn active_slot_count(&self) -> usize {
-        if self.slots.slot_limit <= 1 {
-            0
-        } else {
-            self.slots.slots.len() + 1
-        }
+        self.slots.slots.len() + 1
     }
 
     /// Returns the maximum number of active slots.
@@ -292,7 +294,8 @@ impl<T> Histogram<T> {
 
     /// Returns the estimated count of samples in `[0, position)`,
     /// i.e., strictly below `position`, using trapezoidal
-    /// interpolation within buckets.
+    /// interpolation within buckets. For the terminal bucket,
+    /// `position == u64::MAX` still excludes the endpoint mass at `u64::MAX`.
     pub fn count_below(&self, position: u64) -> u64 {
         self.interpolator().count_below(position) as u64
     }
@@ -347,10 +350,9 @@ impl<T> Histogram<T> {
 
     /// Re-bins this histogram into a different log scale, preserving all slots.
     ///
-    /// For each target bucket `[left, right)`, estimates the sample count via
-    /// `count_below(right) - count_below(left)` using f64 CDF values, then
-    /// rounds to the nearest integer while tracking the fractional remainder
-    /// to preserve the exact total.
+    /// For each target bucket, estimates the sample count from successive
+    /// cumulative counts. The terminal bucket uses the exact source total
+    /// because its upper boundary is inclusive at `u64::MAX`.
     pub fn rescale(&self, width: usize) -> Histogram<T>
     where T: Clone {
         let src_scale = self.log_scale;
@@ -375,12 +377,18 @@ impl<T> Histogram<T> {
     /// Re-bins bucket counts from one log scale to another.
     fn rebin(src_scale: &LogScale, src_buckets: &[u64], dst_scale: &'static LogScale) -> Vec<u64> {
         let mut dst = vec![0u64; dst_scale.num_buckets()];
+        let dst_len = dst.len();
         let mut cursor = CumulativeCount::new(src_scale, src_buckets);
         let mut prev_cdf = 0u64;
+        let src_total: u64 = src_buckets.iter().sum();
 
         for (i, count) in dst.iter_mut().enumerate() {
-            let right = dst_scale.bucket_span(i).right();
-            let cdf_right = cursor.count_below(right).round() as u64;
+            let cdf_right = if i + 1 == dst_len {
+                src_total
+            } else {
+                let right = dst_scale.bucket_span(i).right();
+                cursor.count_below(right).round() as u64
+            };
 
             *count = cdf_right - prev_cdf;
             prev_cdf = cdf_right;
@@ -408,8 +416,9 @@ mod tests {
     fn test_histogram_default() {
         let hist: Histogram = Histogram::default();
         assert_eq!(hist.slot_limit(), 1);
-        assert_eq!(hist.active_slot_count(), 0);
+        assert_eq!(hist.active_slot_count(), 1);
         assert_eq!(hist.total(), 0);
+        assert_eq!(hist.current_data(), None);
     }
 
     #[test]
@@ -675,12 +684,13 @@ mod tests {
     #[test]
     fn test_advance_single_slot() {
         let mut hist: Histogram<u64> = Histogram::new();
-        // With slot_limit<=1, no slots exist; advance just clears aggregate
+        // Single-slot histograms always keep one implicit current period.
         hist.record(42);
         assert_eq!(hist.total(), 1);
         assert_eq!(hist.advance(10), None);
-        assert_eq!(hist.active_slot_count(), 0);
+        assert_eq!(hist.active_slot_count(), 1);
         assert_eq!(hist.total(), 0);
+        assert_eq!(hist.current_data(), Some(&10));
     }
 
     #[test]
@@ -825,8 +835,10 @@ mod tests {
         let mut hist0: Histogram = Histogram::with_slots(0);
         let mut hist1: Histogram = Histogram::with_slots(1);
 
-        assert_eq!(hist0.active_slot_count(), 0);
-        assert_eq!(hist1.active_slot_count(), 0);
+        assert_eq!(hist0.slot_limit(), 1);
+        assert_eq!(hist1.slot_limit(), 1);
+        assert_eq!(hist0.active_slot_count(), 1);
+        assert_eq!(hist1.active_slot_count(), 1);
 
         hist0.record(100);
         hist1.record(100);
@@ -926,16 +938,17 @@ mod tests {
     #[test]
     fn test_single_slot_optimization() {
         let mut hist: Histogram<u64> = Histogram::new();
-        assert_eq!(hist.active_slot_count(), 0);
+        assert_eq!(hist.active_slot_count(), 1);
 
         hist.record(100);
         hist.record(200);
         assert_eq!(hist.total(), 2);
 
-        // advance clears aggregate, no slots exist
+        // advance clears the current period and keeps the replacement metadata
         hist.advance(1);
         assert_eq!(hist.total(), 0);
-        assert_eq!(hist.active_slot_count(), 0);
+        assert_eq!(hist.active_slot_count(), 1);
+        assert_eq!(hist.current_data(), Some(&1));
 
         // record after advance works correctly
         hist.record(50);
@@ -946,6 +959,7 @@ mod tests {
         // multiple advance cycles
         hist.advance(2);
         assert_eq!(hist.total(), 0);
+        assert_eq!(hist.current_data(), Some(&2));
         hist.record(1000);
         hist.record(1000);
         assert_eq!(hist.total(), 2);
