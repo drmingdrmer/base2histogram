@@ -20,8 +20,6 @@ pub use bucket_ref::BucketRef;
 pub use cumulative_count::CumulativeCount;
 pub use histogram::Histogram;
 pub use interpolator::Interpolator;
-#[allow(unused_imports)]
 pub use log_scale::LogScale;
-#[allow(unused_imports)]
 pub use log_scale_config::LogScaleConfig;
 pub use percentile_stats::PercentileStats;

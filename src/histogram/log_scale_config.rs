@@ -34,6 +34,7 @@ pub struct LogScaleConfig {
 }
 
 impl LogScaleConfig {
+    /// Creates a config for the given bit-width.
     pub fn new(width: usize) -> Self {
         let group_size = 1 << (width - 1);
         let mask = (group_size - 1) as u64;
@@ -47,22 +48,27 @@ impl LogScaleConfig {
         }
     }
 
+    /// Bit-width parameter.
     pub fn width(&self) -> usize {
         self.width
     }
 
+    /// Number of buckets per group: `2^(width-1)`.
     pub fn group_size(&self) -> usize {
         self.group_size
     }
 
+    /// Bitmask for extracting the offset within a bucket group.
     pub fn mask(&self) -> u64 {
         self.mask
     }
 
+    /// Total number of buckets covering the full u64 range.
     pub fn buckets(&self) -> usize {
         self.buckets
     }
 
+    /// Number of values eligible for the small-value lookup cache.
     pub fn small_value_cache_size(&self) -> usize {
         self.small_value_cache_size
     }

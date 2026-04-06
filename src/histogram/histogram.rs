@@ -200,7 +200,6 @@ impl<T> Histogram<T> {
     }
 
     /// Returns the number of active slots (stored historicals + implicit current).
-    #[allow(dead_code)]
     #[inline]
     pub fn active_slot_count(&self) -> usize {
         if self.slots.slot_limit <= 1 {
@@ -211,7 +210,6 @@ impl<T> Histogram<T> {
     }
 
     /// Returns the maximum number of active slots.
-    #[allow(dead_code)]
     #[inline]
     pub fn slot_limit(&self) -> usize {
         self.slots.slot_limit
@@ -229,7 +227,6 @@ impl<T> Histogram<T> {
     /// to uniform interpolation at histogram edges or when neighbors are empty.
     ///
     /// Returns `0` if the histogram is empty.
-    #[allow(dead_code)]
     pub fn percentile(&self, p: f64) -> u64 {
         let total = self.total();
         self.percentile_with_total(p, total)

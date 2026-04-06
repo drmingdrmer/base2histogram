@@ -20,6 +20,7 @@ pub struct CumulativeCount<'a> {
 }
 
 impl<'a> CumulativeCount<'a> {
+    /// Creates a new cursor starting at position 0.
     pub fn new(log_scale: &'a LogScale, buckets: &'a [u64]) -> Self {
         Self {
             interpolator: Interpolator::new(log_scale, buckets),
@@ -28,10 +29,12 @@ impl<'a> CumulativeCount<'a> {
         }
     }
 
+    /// Returns the bucket index at or after the last queried position.
     pub fn current_bucket(&self) -> usize {
         self.bucket_index
     }
 
+    /// Returns the sum of all whole-bucket counts before `current_bucket()`.
     pub fn whole_bucket_accumulated(&self) -> u64 {
         self.accumulated
     }

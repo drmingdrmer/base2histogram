@@ -11,6 +11,7 @@ pub struct Series<T> {
 }
 
 impl<T> Series<T> {
+    /// Creates a named series from a histogram.
     pub fn new(name: impl ToString, histogram: Histogram<T>) -> Self {
         Self {
             name: name.to_string(),

@@ -58,6 +58,7 @@ impl<T> Default for AsciiChart<T> {
 }
 
 impl<T> AsciiChart<T> {
+    /// Creates an empty chart with default bar width (40 characters).
     pub fn new() -> Self {
         Self {
             series: Vec::new(),

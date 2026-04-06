@@ -15,6 +15,7 @@ pub struct Interpolator<'a> {
 }
 
 impl<'a> Interpolator<'a> {
+    /// Creates an interpolator over the given bucket counts.
     pub fn new(log_scale: &'a LogScale, buckets: &'a [u64]) -> Self {
         Self { log_scale, buckets }
     }
