@@ -15,10 +15,11 @@ base2histogram is a fixed-size logarithmic histogram.
 It maps each `u64` value to one of 252 buckets (at the default WIDTH=3) using pure integer arithmetic,
 then estimates percentiles via trapezoidal density interpolation.
 
-The design has two key ideas:
+The design has three key ideas:
 
 1. **Float-like encoding** for O(1) bucket indexing with no floating-point math
 2. **Trapezoidal interpolation** for accurate percentile estimation with no extra storage
+3. **CDF-based re-binning** for lossless rescale between different bucket resolutions
 
 ## Part 1: Recording — Float-Like Bucket Encoding
 
@@ -214,51 +215,67 @@ Assume density varies linearly from `m0` to `m2`. The slope:
 k = (d2 - d0) / (m2 - m0)
 ```
 
+For the first bucket, uses (self, right neighbor). For the last bucket, uses (left neighbor, self).
+
+#### Density Slope Clamping
+
+A steep slope from distant neighbors can produce negative density at a bucket edge, which is physically meaningless. The clamped slope ensures non-negative density across the entire bucket width:
+
+```
+d(x) = a + k·x,  x ∈ [0, w]
+```
+
+where `a = d1 - k·w/2` is the density at the left edge.
+
+The constraints are:
+- Left edge:  `d1 - k·w/2 ≥ 0`  →  `k ≤ 2·d1/w`
+- Right edge: `d1 + k·w/2 ≥ 0`  →  `k ≥ -2·d1/w`
+
+If the raw slope violates either bound, it is clamped to the tightest limit.
+
 #### Solving for the Percentile Position
 
-Normalize the bucket to `t ∈ [0, 1]` where `t=0` is the left edge and `t=1` is the right edge.
+Let `x ∈ [0, w]` be the offset from the bucket's left edge (where `w` is the bucket width).
 
-The density across the bucket is a linear function:
+The density inside the bucket is a linear function:
 
 ```
-d(t) = d1 + s · (t - 0.5)
+d(x) = a + k·x
 ```
 
-where `s = k · w1` is the total density change across the bucket. This density is anchored so that the midpoint density equals the bucket's average density `d1` (the midpoint of a linear function always equals its average).
+where `a = d1 - k·w/2` is the density at the left edge, and `k` is the clamped density slope. This density is anchored so that the midpoint density equals the bucket's average density `d1` (the midpoint of a linear function always equals its average).
 
 The CDF within the bucket:
 
 ```
-C(t) = (d1 - s/2) · t + s · t² / 2
+C(x) = a·x + k·x²/2
 ```
 
-The total area `C(1) = d1`, confirming the density integrates to the bucket's average density.
+The total area `C(w) = count`, confirming the density integrates to the bucket's sample count.
 
-To find the target position, solve `C(t) = f · d1` where `f = rank_in_bucket / count`:
-
-```
-s/2 · t² + (d1 - s/2) · t - f · d1 = 0
-```
-
-Let `a = d1 - s/2` (density at the left edge). Then:
+To find the target position, solve `C(x) = rank` where `rank` is the 1-based rank within the bucket:
 
 ```
-t = (-a + √(a² + 2 · s · f · d1)) / s
+k/2 · x² + a · x - rank = 0
+```
+
+Solving via the quadratic formula:
+
+```
+x = (-a + √(a² + 2·k·rank)) / k
 ```
 
 The final estimate:
 
 ```
-value = left + width × t
+value = left + floor(x),  x clamped to [0, w]
 ```
 
 #### Fallback Cases
 
-- **Edge buckets** (first or last): no neighbor on one side → use uniform interpolation (`t = f`)
 - **Single-count or width-1 bucket**: return the midpoint
-- **Equal neighbor counts** (`c0 == c2`): density is uniform → `t = f`
-- **Near-zero slope** (`|s| < |d1| × 10⁻⁹`): effectively uniform → `t = f`
-- **Negative discriminant**: fall back to `t = f`
+- **Near-zero slope** (`|k·w| < |d1| × 10⁻⁹`): effectively uniform → `x = rank / d1`
+- **Negative discriminant**: fall back to `x = rank / d1`
 
 ## Error Bound
 
@@ -312,9 +329,9 @@ For the latency distributions that matter most (LN-API, LN-DB), WIDTH=3 delivers
 
 ## Data Structures
 
-### `Histogram<T, WIDTH>`
+### `Histogram<T>`
 
-The main struct. `T` is optional user metadata per slot. `WIDTH` is a compile-time const generic.
+The main struct. `T` is optional user metadata per slot (defaults to `()`).
 
 ```rust
 pub struct Histogram<T = ()> {
@@ -330,21 +347,43 @@ pub struct Histogram<T = ()> {
 - `aggregate`: running sum of all slot buckets (`.buckets`) and current period metadata (`.data`)
 - `total`: cached total sample count
 
-### `LogScale<WIDTH>`
+### `LogScale`
 
 Precomputed lookup tables for O(1) bucket operations.
 
 ```rust
-pub struct LogScale<const WIDTH: usize> {
+pub struct LogScale {
+    config: LogScaleConfig,
     bucket_min_values: Vec<u64>,
     small_value_buckets: Vec<u8>,
 }
 ```
 
+- `config`: bucket math parameters (width, group_size, mask, total bucket count)
 - `bucket_min_values[i]`: left boundary of bucket `i`
 - `small_value_buckets[v]`: cached bucket index for values 0–4095
 
-A shared static instance `LOG_SCALE` is initialized once via `LazyLock`.
+Width is a runtime parameter (1..=16). Shared static instances are initialized once via `LazyLock` and accessed through `LogScale::get(width)`.
+
+### `LogScaleConfig`
+
+Configuration for logarithmic bucket boundaries.
+
+```rust
+pub struct LogScaleConfig {
+    width: usize,
+    group_size: usize,
+    mask: u64,
+    buckets: usize,
+    small_value_cache_size: usize,
+}
+```
+
+- `width`: bit-width parameter (1..=16). Each bucket group uses `width` bits: 1 MSB + (width-1) offset bits
+- `group_size`: buckets per group = `2^(width-1)`
+- `mask`: bitmask for offset extraction = `group_size - 1`
+- `buckets`: total bucket count = `group_size × (66 - width)`
+- `small_value_cache_size`: number of cached small-value lookups (4096)
 
 ### `Slot<T>`
 
@@ -357,19 +396,118 @@ pub struct Slot<T> {
 }
 ```
 
-### `BucketSpan<WIDTH>` / `BucketRef<WIDTH>`
+### `Interpolator`
+
+Stateless interpolation engine operating on bucket counts and geometry.
+
+```rust
+pub struct Interpolator<'a> {
+    log_scale: &'a LogScale,
+    buckets: &'a [u64],
+}
+```
+
+Independent of any particular histogram instance — constructed from a `&LogScale` and a `&[u64]` bucket slice.
+
+### `CumulativeCount`
+
+Incremental cursor for computing cumulative counts at monotonically increasing positions.
+
+```rust
+pub struct CumulativeCount<'a> {
+    interpolator: Interpolator<'a>,
+    bucket_index: usize,
+    accumulated: u64,
+}
+```
+
+- `bucket_index`: current scan position, advances forward only
+- `accumulated`: sum of whole-bucket counts before `bucket_index`
+
+Each `count_below(position)` call resumes from where the previous call left off, giving O(1) amortized cost when queries are monotonically increasing. Used by the [rescale algorithm](#part-3-rescale--cdf-based-re-binning) to efficiently redistribute counts across bucket boundaries.
+
+### `BucketSpan` / `BucketRef`
 
 Lazy references to bucket geometry. `BucketSpan` provides `left()`, `right()`, `width()`, `midpoint()` via the LogScale lookup table. `BucketRef` adds the `count` field.
 
 ## Sliding Window
 
-The histogram supports multiple slots for time-windowed aggregation. Each slot has independent bucket counts. The `aggregate` field holds the running sum of all active slots, maintained incrementally.
+The histogram supports multiple slots for time-windowed aggregation.
+With `slot_limit = N`, only `N - 1` slots are physically stored.
+The current (newest) period is never materialized — its counts are derived on the fly as `aggregate - Σ stored`:
 
-When `advance()` is called:
-1. If the slot queue is full, evict the oldest slot by subtracting its buckets from the aggregate — O(bucket_count)
-2. Push a new empty slot
+```
+stored slots:  [a, b, c]              (N - 1 historical periods)
+aggregate:     agg = a + b + c + d    (running total across all N periods)
+implicit:      d = agg - a - b - c    (current period, not stored)
+```
+
+`record()` only touches the `aggregate`; individual slot writes are avoided entirely.
+
+### Slot Rotation (`advance()`)
+
+When `advance()` is called with new metadata, the implicit current period is materialized and the oldest period is evicted:
+
+**At capacity** (queue full):
+```
+1. evict oldest:  agg ← agg - a          (subtract oldest from aggregate)
+2. materialize:   a   ← agg - b - c      (reuse evicted Vec for current period)
+3. push:          slots: [b, c, a']       (a' now holds d's counts)
+```
+
+**During warmup** (queue not full):
+```
+1. allocate new Vec
+2. materialize:   new ← agg - Σ stored
+3. push:          slots: [...existing, new]
+```
+
+The evicted slot's `Vec<u64>` allocation is reused, avoiding repeated allocation.
 
 This gives efficient sliding-window metrics without requiring the caller to track individual values or full per-window histograms.
+
+## Part 3: Rescale — CDF-Based Re-Binning
+
+Rescaling converts a histogram from one WIDTH to another, preserving all slots and the total sample count.
+
+### Problem
+
+Different WIDTHs produce different bucket boundaries.
+A source bucket `[s_left, s_right)` may straddle multiple destination buckets.
+Simply moving whole counts between buckets would lose resolution — the information about where samples fall *within* a bucket matters.
+
+### Solution: CDF Transfer
+
+For each destination bucket `[d_left, d_right)`, estimate how many source samples fall in that range using the trapezoidal CDF:
+
+```
+dst_count[i] = CDF(d_right) - CDF(d_left)
+```
+
+where `CDF(x)` is the estimated count of samples below `x`, computed via trapezoidal interpolation over the source buckets.
+
+### Algorithm
+
+```
+1. Create a CumulativeCount cursor over the source buckets
+2. prev_cdf ← 0
+3. For each destination bucket i:
+     cdf_right ← cursor.count_below(dst_bucket[i].right())
+     dst_count[i] ← round(cdf_right) - prev_cdf
+     prev_cdf ← round(cdf_right)
+```
+
+The `CumulativeCount` cursor maintains scan state, so each `count_below()` call resumes from the previous position — O(src_buckets) total work across all destination buckets, not O(src_buckets) per destination bucket.
+
+The `round()` preserves integer totals: since each destination count is derived from the difference of rounded CDF values, the sum of all destination counts equals the original total.
+
+### Rescale Scope
+
+`rescale()` re-bins every stored component independently:
+- The aggregate slot (running sum of all periods)
+- Each historical slot in the queue
+
+The `total` sample count is preserved exactly. Slot metadata (`T`) is cloned.
 
 ## Complexity
 
@@ -378,5 +516,6 @@ This gives efficient sliding-window metrics without requiring the caller to trac
 | Record a value | O(1) | — |
 | Percentile query | O(bucket_count) | — |
 | Advance slot | O(bucket_count) | — |
+| Rescale | O(src_buckets + dst_buckets) per slot | O(dst_buckets) |
 | Memory per slot | — | `bucket_count × 8` bytes |
 | Total (WIDTH=3, 1 slot) | — | ~2 KB |
