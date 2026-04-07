@@ -62,7 +62,7 @@ impl<'a> BucketSpan<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::log_scale::LogScale;
+    use crate::histogram::scale::LogScale;
 
     #[test]
     fn test_bucket_span() {

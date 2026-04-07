@@ -1,5 +1,5 @@
-use super::bucket_ref::BucketRef;
-use super::log_scale::LogScale;
+use crate::histogram::bucket_ref::BucketRef;
+use crate::histogram::scale::LogScale;
 
 /// Interpolates between discrete histogram buckets to produce continuous estimates.
 ///

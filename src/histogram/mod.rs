@@ -1,26 +1,19 @@
 mod ascii_chart;
 mod bucket_ref;
-mod bucket_span;
-mod compact_display;
-mod cumulative_count;
-mod detailed_display;
 mod display_buckets;
 #[allow(clippy::module_inception)]
 mod histogram;
-mod interpolator;
-mod log_scale;
-mod log_scale_config;
+mod interpolation;
 mod percentile_stats;
-mod series;
+mod scale;
 mod slot;
-mod slot_queue;
 
 pub use ascii_chart::AsciiChart;
 pub use bucket_ref::BucketRef;
-pub use cumulative_count::CumulativeCount;
 pub use display_buckets::DisplayBuckets;
 pub use histogram::Histogram;
-pub use interpolator::Interpolator;
-pub use log_scale::LogScale;
-pub use log_scale_config::LogScaleConfig;
+pub use interpolation::CumulativeCount;
+pub use interpolation::Interpolator;
 pub use percentile_stats::PercentileStats;
+pub use scale::LogScale;
+pub use scale::LogScaleConfig;

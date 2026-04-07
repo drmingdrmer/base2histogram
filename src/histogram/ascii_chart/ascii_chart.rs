@@ -3,8 +3,8 @@ use std::fmt::Write;
 
 use super::compact_display::CompactDisplay;
 use super::detailed_display::DetailedDisplay;
-use super::histogram::Histogram;
 use super::series::Series;
+use crate::histogram::Histogram;
 
 pub(crate) const BAR_CHARS: [char; 8] = ['█', '▒', '░', '▓', '▞', '▚', '▖', '▘'];
 

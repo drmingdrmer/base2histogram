@@ -1,4 +1,4 @@
-use super::histogram::Histogram;
+use crate::histogram::Histogram;
 
 /// A named histogram series within an [`super::ascii_chart::AsciiChart`].
 #[derive(Debug, Clone)]

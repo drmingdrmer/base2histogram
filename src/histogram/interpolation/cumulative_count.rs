@@ -1,5 +1,5 @@
 use super::interpolator::Interpolator;
-use super::log_scale::LogScale;
+use crate::histogram::scale::LogScale;
 
 /// An incremental cursor for computing cumulative counts at monotonically
 /// increasing positions over a histogram's interpolation model.

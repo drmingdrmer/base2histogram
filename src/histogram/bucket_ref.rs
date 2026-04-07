@@ -1,8 +1,8 @@
 use std::fmt;
 use std::fmt::Formatter;
 
-use super::bucket_span::BucketSpan;
-use super::log_scale::LogScale;
+use super::scale::BucketSpan;
+use super::scale::LogScale;
 
 /// A lazy reference to a single bucket in a histogram.
 ///

@@ -1,11 +1,11 @@
 use super::bucket_ref::BucketRef;
-use super::cumulative_count::CumulativeCount;
-use super::interpolator::Interpolator;
-use super::log_scale::LogScale;
+use super::display_buckets::DisplayBuckets;
+use super::interpolation::CumulativeCount;
+use super::interpolation::Interpolator;
 use super::percentile_stats::PercentileStats;
+use super::scale::LogScale;
 use super::slot::Slot;
-use super::slot_queue::SlotQueue;
-use crate::histogram::display_buckets::DisplayBuckets;
+use super::slot::SlotQueue;
 
 /// A histogram for tracking the distribution of u64 values using logarithmic bucketing.
 ///
