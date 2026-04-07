@@ -397,6 +397,60 @@ impl<T> Histogram<T> {
         dst
     }
 
+    /// Merges another histogram's counts into this one.
+    ///
+    /// If both histograms use the same log scale, slots are merged directly
+    /// bucket by bucket. If the scales differ, `other` is rescaled to
+    /// `self`'s width before merging.
+    ///
+    /// Slots are paired from newest to oldest. If `other` has fewer stored
+    /// slots, its oldest slots simply have no counterpart and `self`'s
+    /// older slots keep their original counts. If `other` has more stored
+    /// slots, the extras are appended (and `slot_limit` is expanded).
+    ///
+    /// The aggregate slot is always merged.
+    pub fn merge(&mut self, other: &Histogram<T>)
+    where T: Clone {
+        let same_scale = self.log_scale.config().width() == other.log_scale.config().width();
+
+        if same_scale {
+            self.merge_same_scale(other);
+        } else {
+            let rescaled = other.rescale(self.width());
+            self.merge_same_scale(&rescaled);
+        }
+    }
+
+    fn merge_same_scale(&mut self, other: &Histogram<T>)
+    where T: Clone {
+        // Merge aggregate
+        self.aggregate.add(&other.aggregate);
+
+        // Merge stored slots, pairing from newest (back) to oldest (front)
+        let self_len = self.slots.slots.len();
+        let other_len = other.slots.slots.len();
+        let paired = self_len.min(other_len);
+
+        // Pair the newest `paired` slots
+        for i in 0..paired {
+            let self_idx = self_len - 1 - i;
+            let other_idx = other_len - 1 - i;
+            self.slots.slots[self_idx].add(&other.slots.slots[other_idx]);
+        }
+
+        // If other has more slots, prepend the extras at the front
+        if other_len > self_len {
+            let extra_count = other_len - self_len;
+            for i in (0..extra_count).rev() {
+                self.slots.slots.push_front(other.slots.slots[i].clone());
+            }
+        }
+
+        // Expand slot_limit if needed
+        let new_limit = self.slots.slot_limit.max(other.slots.slot_limit);
+        self.slots.slot_limit = new_limit;
+    }
+
     /// Returns a display wrapper that prints non-empty buckets, one per line.
     pub fn display_buckets(&self) -> DisplayBuckets<'_, T> {
         DisplayBuckets::new(self)
@@ -1292,6 +1346,121 @@ mod tests {
         hist.record_n(5, 3);
         let s = hist.display_buckets().to_string();
         assert_eq!(s, "b5[5,6)=3");
+    }
+
+    // Merge tests
+
+    #[test]
+    fn test_merge_same_scale() {
+        let mut a = Histogram::<()>::new();
+        a.record_n(10, 5);
+        a.record_n(100, 3);
+
+        let mut b = Histogram::<()>::new();
+        b.record_n(10, 2);
+        b.record_n(200, 4);
+
+        a.merge(&b);
+        assert_eq!(a.total(), 14);
+
+        let idx_10 = LogScale::get(3).calculate_bucket(10);
+        let idx_100 = LogScale::get(3).calculate_bucket(100);
+        let idx_200 = LogScale::get(3).calculate_bucket(200);
+        assert_eq!(a.aggregate.count_at(idx_10), 7);
+        assert_eq!(a.aggregate.count_at(idx_100), 3);
+        assert_eq!(a.aggregate.count_at(idx_200), 4);
+    }
+
+    #[test]
+    fn test_merge_different_scale() {
+        let mut a = Histogram::<()>::with_log_scale(3, 1);
+        a.record_n(10, 5);
+        a.record_n(100, 3);
+
+        let mut b = Histogram::<()>::with_log_scale(5, 1);
+        b.record_n(10, 2);
+        b.record_n(100, 4);
+
+        a.merge(&b);
+        // Total preserved: 5+3+2+4 = 14
+        assert_eq!(a.total(), 14);
+        // Width unchanged — self keeps its scale
+        assert_eq!(a.width(), 3);
+    }
+
+    #[test]
+    fn test_merge_slots_newest_first() {
+        // a: 3 slots — [s0(data=None), s1(data="a")] + aggregate(data="b")
+        let mut a = Histogram::<&str>::with_slots(3);
+        a.record_n(10, 2);
+        a.advance("a");
+        a.record_n(20, 3);
+        a.advance("b");
+        a.record_n(30, 1);
+        assert_eq!(a.active_slot_count(), 3);
+        assert_eq!(a.total(), 6);
+
+        // b: 2 slots — [s0(data="x")] + aggregate(data="y")
+        let mut b = Histogram::<&str>::with_slots(2);
+        b.record_n(10, 10);
+        b.advance("x");
+        b.record_n(20, 20);
+        b.advance("y");
+        b.record_n(30, 30);
+        assert_eq!(b.active_slot_count(), 2);
+        // b evicted the initial slot (10), so total = 20 + 30 = 50
+        assert_eq!(b.total(), 50);
+        // b has 1 stored slot: slot("x", total=20)
+        assert_eq!(b.slots.slots.len(), 1);
+        assert_eq!(b.slots.slots[0].total(), 20);
+
+        a.merge(&b);
+
+        // Aggregate merged: 6 + 50 = 56
+        assert_eq!(a.total(), 56);
+
+        // Slot pairing from newest:
+        //   a.slots[1] ("a") += b.slots[0] ("x")  — both are the newest historical
+        //   a.slots[0] (None) — no counterpart in b
+        // a.slots[0] total should be 2 (only from a, unchanged)
+        let a_slot0_total = a.slots.slots[0].total();
+        assert_eq!(a_slot0_total, 2);
+
+        // a.slots[1] total should be 3 + 20 = 23
+        let a_slot1_total = a.slots.slots[1].total();
+        assert_eq!(a_slot1_total, 23);
+    }
+
+    #[test]
+    fn test_merge_other_has_more_slots() {
+        // a: 1 slot (single slot mode)
+        let mut a = Histogram::<()>::new();
+        a.record_n(10, 5);
+
+        // b: 3 slots
+        let mut b = Histogram::<()>::with_slots(3);
+        b.record_n(10, 1);
+        b.advance(());
+        b.record_n(20, 2);
+        b.advance(());
+        b.record_n(30, 3);
+
+        a.merge(&b);
+        assert_eq!(a.total(), 11); // 5 + 1 + 2 + 3
+
+        // a should now have b's stored slots prepended
+        assert_eq!(a.slots.slots.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_with_empty() {
+        let mut a = Histogram::<()>::new();
+        a.record_n(10, 5);
+
+        let b = Histogram::<()>::new();
+        a.merge(&b);
+
+        assert_eq!(a.total(), 5);
     }
 
     test_histogram_width_edge_cases!(test_width_edge_1, 1);

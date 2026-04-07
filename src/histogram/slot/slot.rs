@@ -75,6 +75,18 @@ impl<T> Slot<T> {
         self.total -= other.total;
     }
 
+    /// Adds another slot's bucket counts, region sums, and total
+    /// into this slot.
+    pub(crate) fn add(&mut self, other: &Slot<T>) {
+        (0..self.buckets.len()).for_each(|i| {
+            self.buckets[i] += other.buckets[i];
+        });
+        (0..self.region_sums.len()).for_each(|r| {
+            self.region_sums[r] += other.region_sums[r];
+        });
+        self.total += other.total;
+    }
+
     /// Finds the bucket containing the given rank (1-based).
     ///
     /// Uses a two-phase scan: first over region sums to find the region,
@@ -200,6 +212,22 @@ mod tests {
         slot.record_n(0, 3);
         slot.record_n(5, 7);
         assert_eq!(slot.total(), 10);
+    }
+
+    #[test]
+    fn test_add() {
+        let mut a: Slot<()> = Slot::new(4);
+        a.record_n(0, 10);
+        a.record_n(1, 20);
+
+        let mut b: Slot<()> = Slot::new(4);
+        b.record_n(1, 5);
+        b.record_n(3, 7);
+
+        a.add(&b);
+        assert_eq!(a.buckets, vec![10, 25, 0, 7]);
+        assert_eq!(a.total(), 42);
+        assert_eq!(a.region_sums[0], 42);
     }
 
     #[test]
