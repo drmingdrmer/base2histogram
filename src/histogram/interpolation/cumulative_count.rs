@@ -77,6 +77,30 @@ impl<'a> CumulativeCount<'a> {
 
         self.accumulated as f64
     }
+
+    /// Returns the interpolated value at the given rank (1-based position in
+    /// sorted order).
+    ///
+    /// Each successive call must pass a `rank` >= the previous one.
+    /// Returns `0` if `rank` exceeds the total sample count.
+    pub fn value_at_rank(&mut self, rank: u64) -> u64 {
+        let num_buckets = self.interpolator.num_buckets();
+
+        while self.bucket_index < num_buckets {
+            let count = self.interpolator.bucket(self.bucket_index).count();
+            let next = self.accumulated + count;
+
+            if next >= rank {
+                let rank_in_bucket = rank - self.accumulated;
+                return self.interpolator.rank_to_position(self.bucket_index, rank_in_bucket);
+            }
+
+            self.accumulated = next;
+            self.bucket_index += 1;
+        }
+
+        0
+    }
 }
 
 #[cfg(test)]
@@ -288,5 +312,75 @@ mod tests {
 
         let c = cursor.count_below(u64::MAX);
         assert!((c - total).abs() < 1e-6);
+    }
+
+    // === value_at_rank tests ===
+
+    #[test]
+    fn test_value_at_rank_empty() {
+        let mut cursor = make_cursor(&[]);
+        assert_eq!(cursor.value_at_rank(1), 0);
+    }
+
+    #[test]
+    fn test_value_at_rank_single_value() {
+        // Bucket 9: [10,12) midpoint=11, count=1
+        let mut cursor = make_cursor(&[(10, 1)]);
+        assert_eq!(cursor.value_at_rank(1), 11);
+    }
+
+    #[test]
+    fn test_value_at_rank_boundary_and_interior() {
+        // Bucket 8:[8,10) c=10, Bucket 9:[10,12) c=20, Bucket 10:[12,14) c=30
+        let mut cursor = make_cursor(&[(8, 10), (10, 20), (12, 30)]);
+
+        // First and last rank in bucket 8
+        assert_eq!(cursor.value_at_rank(1), 8);
+        assert_eq!(cursor.value_at_rank(10), 10);
+
+        // First, middle, last rank in bucket 9
+        assert_eq!(cursor.value_at_rank(11), 10);
+        assert_eq!(cursor.value_at_rank(19), 11);
+        assert_eq!(cursor.value_at_rank(30), 12);
+
+        // First, middle, last rank in bucket 10
+        assert_eq!(cursor.value_at_rank(31), 12);
+        assert_eq!(cursor.value_at_rank(47), 13);
+        assert_eq!(cursor.value_at_rank(60), 14);
+    }
+
+    #[test]
+    fn test_value_at_rank_past_total() {
+        // Bucket 8:[8,10) c=10, Bucket 9:[10,12) c=20, total=30
+        let mut cursor = make_cursor(&[(8, 10), (10, 20)]);
+
+        assert_eq!(cursor.value_at_rank(1), 8);
+        assert_eq!(cursor.value_at_rank(15), 10);
+        assert_eq!(cursor.value_at_rank(30), 12);
+        // Past total → 0
+        assert_eq!(cursor.value_at_rank(31), 0);
+        assert_eq!(cursor.value_at_rank(100), 0);
+    }
+
+    #[test]
+    fn test_value_at_rank_same_rank_twice() {
+        let mut cursor = make_cursor(&[(8, 10), (10, 20), (12, 30)]);
+
+        assert_eq!(cursor.value_at_rank(15), 10);
+        assert_eq!(cursor.value_at_rank(15), 10);
+    }
+
+    #[test]
+    fn test_value_at_rank_gap_between_buckets() {
+        // Bucket 5:[5,6) c=10, Bucket 12:[16,20) c=40
+        let mut cursor = make_cursor(&[(5, 10), (16, 40)]);
+
+        // Last rank in first bucket
+        assert_eq!(cursor.value_at_rank(10), 5);
+        // First rank in second bucket (after empty gap)
+        assert_eq!(cursor.value_at_rank(11), 16);
+        // Middle and last of second bucket
+        assert_eq!(cursor.value_at_rank(25), 17);
+        assert_eq!(cursor.value_at_rank(50), 20);
     }
 }

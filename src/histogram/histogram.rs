@@ -305,18 +305,37 @@ impl<T> Histogram<T> {
         Interpolator::new(self.log_scale, &self.aggregate.buckets)
     }
 
+    /// Computes multiple percentiles in a single O(n + k) pass over the buckets,
+    /// where n is the number of buckets and k is the number of requested percentiles.
+    ///
+    /// `percentiles` must be sorted in ascending order; each value must be in `[0.0, 1.0]`.
+    /// Violating either condition produces unspecified results.
+    ///
+    /// Returns an iterator yielding the interpolated value at each percentile.
+    /// Yields `0` for empty histograms.
+    pub fn percentiles<'a>(&'a self, percentiles: &'a [f64]) -> impl Iterator<Item = u64> + 'a {
+        let total = self.aggregate.total();
+        let mut cursor = self.cumulative_count();
+
+        percentiles.iter().map(move |&p| {
+            let rank = (total as f64 * p).ceil().max(1.0) as u64;
+            cursor.value_at_rank(rank)
+        })
+    }
+
     /// Returns common percentile statistics: samples, P0.1, P1, P5, P10, P50, P90, P99, P99.9.
     pub fn percentile_stats(&self) -> PercentileStats {
+        let mut iter = self.percentiles(&[0.001, 0.01, 0.05, 0.10, 0.50, 0.90, 0.99, 0.999]);
         PercentileStats {
             samples: self.aggregate.total(),
-            p0_1: self.percentile(0.001),
-            p1: self.percentile(0.01),
-            p5: self.percentile(0.05),
-            p10: self.percentile(0.10),
-            p50: self.percentile(0.50),
-            p90: self.percentile(0.90),
-            p99: self.percentile(0.99),
-            p99_9: self.percentile(0.999),
+            p0_1: iter.next().unwrap(),
+            p1: iter.next().unwrap(),
+            p5: iter.next().unwrap(),
+            p10: iter.next().unwrap(),
+            p50: iter.next().unwrap(),
+            p90: iter.next().unwrap(),
+            p99: iter.next().unwrap(),
+            p99_9: iter.next().unwrap(),
         }
     }
 
@@ -683,6 +702,66 @@ mod tests {
         // P99 should be around value 10
         let p99 = hist.percentile(0.99);
         assert!((9..=11).contains(&p99), "P99 = {p99}");
+    }
+
+    #[test]
+    fn test_percentiles_batch() {
+        let mut hist: Histogram = Histogram::new();
+        for i in 1..=100 {
+            hist.record(i);
+        }
+
+        let ps = [
+            0.0, 0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 0.999, 1.0,
+        ];
+        let result: Vec<u64> = hist.percentiles(&ps).collect();
+        assert_eq!(result, vec![1, 1, 1, 5, 11, 26, 51, 76, 90, 96, 105, 112, 112]);
+    }
+
+    #[test]
+    fn test_percentiles_empty() {
+        let hist: Histogram = Histogram::new();
+        let result: Vec<u64> = hist.percentiles(&[0.5, 0.9, 0.99]).collect();
+        assert_eq!(result, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn test_percentiles_single_value() {
+        let mut hist: Histogram = Histogram::new();
+        hist.record(10);
+        let result: Vec<u64> = hist.percentiles(&[0.0, 0.5, 1.0]).collect();
+        assert_eq!(result, vec![11, 11, 11]);
+    }
+
+    #[test]
+    fn test_percentiles_empty_input() {
+        let mut hist: Histogram = Histogram::new();
+        hist.record(10);
+        let result: Vec<u64> = hist.percentiles(&[]).collect();
+        assert_eq!(result, Vec::<u64>::new());
+    }
+
+    #[test]
+    fn test_percentiles_duplicate_values() {
+        let mut hist: Histogram = Histogram::new();
+        hist.record_n(100, 50);
+        hist.record_n(200, 50);
+        let result: Vec<u64> = hist.percentiles(&[0.5, 0.5, 0.5]).collect();
+        assert_eq!(result, vec![112, 112, 112]);
+    }
+
+    #[test]
+    fn test_percentiles_across_many_buckets() {
+        let mut hist: Histogram = Histogram::new();
+        for v in [1, 10, 100, 1000, 10_000, 100_000, 1_000_000] {
+            hist.record_n(v, 100);
+        }
+
+        let ps = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+        let result: Vec<u64> = hist.percentiles(&ps).collect();
+        assert_eq!(result, vec![
+            1, 1, 10, 97, 108, 960, 8601, 10035, 108134, 956825, 1048576
+        ]);
     }
 
     #[test]
