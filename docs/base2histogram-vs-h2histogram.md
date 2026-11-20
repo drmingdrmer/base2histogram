@@ -117,15 +117,15 @@ then solves the CDF inverse to place the estimate within the bucket. This produc
 
 ### 2. Precomputed lookup tables
 
-`bucket_min_values[252]` and `small_value_buckets[4096]` are computed once at static initialization. H2 recomputes `index_to_lower_bound` / `index_to_upper_bound` with shifts and adds on every call. Both are cheap integer operations, but the table lookup avoids recomputation entirely — one memory access vs several instructions.
+`bucket_min_values[252]` and `small_value_buckets[4096]` are computed once, the first time a histogram uses that width. H2 recomputes `index_to_lower_bound` / `index_to_upper_bound` with shifts and adds on every call. Both are cheap integer operations, but the table lookup avoids recomputation entirely — one memory access vs several instructions.
 
 ### 3. Sliding window with slot-level eviction
 
 Multi-slot architecture maintains per-slot bucket arrays plus a running aggregate. `advance()` evicts the oldest slot in O(bucket_count) — one subtraction per bucket. H2's `checked_sub` can subtract histograms but requires the caller to manage the window and retain full per-window histograms externally.
 
-### 4. Precomputed LogScale with LazyLock
+### 4. Precomputed LogScale, built on first use
 
-WIDTH (1..=16) is a runtime parameter, but `LogScale` instances are created once via `LazyLock` and shared as `&'static` references. All derived constants (group_size, mask, bucket boundaries) are computed once and reused. H2's `grouping_power` is also runtime but recomputes boundaries on demand.
+WIDTH (1..=16) is a runtime parameter, but each width's `LogScale` is created once, on first use, in a `OnceLock` and shared as a `&'static` reference. A process builds only the widths it uses: the tables of all 16 widths together take about 27 MB. All derived constants (group_size, mask, bucket boundaries) are computed once and reused. H2's `grouping_power` is also runtime but recomputes boundaries on demand.
 
 ## Percentile Calculation
 
@@ -193,7 +193,7 @@ For a single percentile query, base2histogram's tiered scan (~32 iterations) is 
 | Percentile rank (inverse) | No | No |
 | Serde serialization | Yes (feature-gated) | No |
 | JSON Schema | Yes (feature-gated) | No |
-| Configurable at runtime | Yes (grouping_power) | Yes (WIDTH 1–16, LazyLock) |
+| Configurable at runtime | Yes (grouping_power) | Yes (WIDTH 1–16, OnceLock) |
 | Precomputed boundaries | No | Yes |
 | Small-value cache | No | Yes (4096 entries) |
 

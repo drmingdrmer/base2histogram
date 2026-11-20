@@ -1,4 +1,4 @@
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 use super::bucket_span::BucketSpan;
 use super::log_scale_config::LogScaleConfig;
@@ -19,16 +19,19 @@ pub struct LogScale {
     small_value_buckets: Vec<u8>,
 }
 
-static LOG_SCALES: LazyLock<Vec<LogScale>> =
-    LazyLock::new(|| (LogScaleConfig::MIN_WIDTH..=LogScaleConfig::MAX_WIDTH).map(LogScale::new).collect());
+/// The shared instance of each width, built on first use: the tables of the widest scales take
+/// megabytes, so a process builds only the widths it uses.
+static LOG_SCALES: [OnceLock<LogScale>; LogScaleConfig::MAX_WIDTH] =
+    [const { OnceLock::new() }; LogScaleConfig::MAX_WIDTH];
 
 impl LogScale {
     pub const DEFAULT_WIDTH: usize = 3;
 
-    /// Returns a shared `LogScale` instance for the given width (1..=16).
+    /// Returns a shared `LogScale` instance for the given width (1..=16), building it on the
+    /// first call for that width.
     pub fn get(width: usize) -> &'static LogScale {
         LogScaleConfig::validate_width(width);
-        &LOG_SCALES[width - 1]
+        LOG_SCALES[width - 1].get_or_init(|| LogScale::new(width))
     }
 
     /// Creates a new `LogScale` for the given width configuration.
